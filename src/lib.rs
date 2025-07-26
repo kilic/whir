@@ -1,3 +1,5 @@
+pub mod transcript;
+
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum Error {
     Transcript,
@@ -9,8 +11,8 @@ pub(crate) mod test {
     use rand::{rngs::StdRng, SeedableRng};
 
     #[allow(dead_code)]
-    pub(crate) fn seed_rng() -> StdRng {
-        StdRng::seed_from_u64(1)
+    pub(crate) fn rng(seed: u64) -> StdRng {
+        StdRng::seed_from_u64(seed)
     }
 
     #[allow(dead_code)]
