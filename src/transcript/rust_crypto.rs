@@ -1,13 +1,15 @@
+use crate::field::SerializedField;
+use crate::transcript::BytesReader;
+use crate::transcript::BytesWriter;
+use crate::transcript::Challenge;
+use crate::transcript::Reader;
+use crate::transcript::Writer;
 use digest::Digest;
 use digest::FixedOutputReset;
 use p3_field::ExtensionField;
 use p3_field::Field;
 use std::io::Read;
 use std::io::Write;
-
-use crate::transcript::Challenge;
-use crate::transcript::FieldReader;
-use crate::transcript::FieldWriter;
 
 const RUST_CRYPTO_UPDATE: u8 = 1;
 
@@ -50,22 +52,43 @@ impl<W: Write + Default, D: Digest + FixedOutputReset + Clone> RustCryptoWriter<
     }
 }
 
-impl<W: Write, D: Digest + FixedOutputReset, F: Field> FieldWriter<F> for RustCryptoWriter<W, D> {
+impl<W: Write, D: Digest + FixedOutputReset, F: SerializedField> Writer<F>
+    for RustCryptoWriter<W, D>
+{
+    fn write(&mut self, e: F) -> Result<(), crate::Error> {
+        e.to_bytes()
+            .map_err(|_| crate::Error::Transcript)
+            .and_then(|bytes| <Self as BytesWriter>::write(self, &bytes))
+    }
+
     fn write_hint(&mut self, e: F) -> Result<(), crate::Error> {
-        let bytes = bincode::serialize(&e).unwrap();
-        self.writer
-            .write_all(&bytes)
-            .map_err(|_| crate::Error::Transcript)?;
+        e.to_bytes()
+            .map_err(|_| crate::Error::Transcript)
+            .and_then(|bytes| <Self as BytesWriter>::write_hint(self, &bytes))
+    }
+}
+
+impl<W: Write, D: Digest + FixedOutputReset> Writer<[u8; 32]> for RustCryptoWriter<W, D> {
+    fn write(&mut self, e: [u8; 32]) -> Result<(), crate::Error> {
+        <Self as BytesWriter>::write(self, &e)
+    }
+
+    fn write_hint(&mut self, e: [u8; 32]) -> Result<(), crate::Error> {
+        <Self as BytesWriter>::write_hint(self, &e)
+    }
+}
+
+impl<W: Write, D: Digest + FixedOutputReset> BytesWriter for RustCryptoWriter<W, D> {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), crate::Error> {
+        <Self as BytesWriter>::write_hint(self, bytes)?;
+        Digest::update(&mut self.hasher, bytes);
         Ok(())
     }
 
-    fn write(&mut self, e: F) -> Result<(), crate::Error> {
-        let bytes = bincode::serialize(&e).map_err(|_| crate::Error::Transcript)?;
+    fn write_hint(&mut self, bytes: &[u8]) -> Result<(), crate::Error> {
         self.writer
-            .write_all(&bytes)
-            .map_err(|_| crate::Error::Transcript)?;
-        Digest::update(&mut self.hasher, bytes);
-        Ok(())
+            .write_all(bytes)
+            .map_err(|_| crate::Error::Transcript)
     }
 }
 
@@ -96,22 +119,45 @@ impl<R: Read, D: Digest + FixedOutputReset + Clone> RustCryptoReader<R, D> {
     }
 }
 
-impl<W: Read, D: Digest + FixedOutputReset, F: Field> FieldReader<F> for RustCryptoReader<W, D> {
-    fn read_hint(&mut self) -> Result<F, crate::Error> {
-        let mut bytes = vec![0u8; F::NUM_BYTES];
-        self.reader
-            .read_exact(bytes.as_mut())
-            .map_err(|_| crate::Error::Transcript)?;
-        bincode::deserialize(&bytes).map_err(|_| crate::Error::Transcript)
+impl<W: Read, D: Digest + FixedOutputReset, F: SerializedField> Reader<F>
+    for RustCryptoReader<W, D>
+{
+    fn read(&mut self) -> Result<F, crate::Error> {
+        <Self as BytesReader>::read(self, F::NUM_BYTES)
+            .and_then(|bytes| F::from_bytes(&bytes).map_err(|_| crate::Error::Transcript))
     }
 
-    fn read(&mut self) -> Result<F, crate::Error> {
-        let mut bytes = vec![0u8; F::NUM_BYTES];
+    fn read_hint(&mut self) -> Result<F, crate::Error> {
+        <Self as BytesReader>::read_hint(self, F::NUM_BYTES)
+            .and_then(|bytes| F::from_bytes(&bytes).map_err(|_| crate::Error::Transcript))
+    }
+}
+
+impl<W: Read, D: Digest + FixedOutputReset> Reader<[u8; 32]> for RustCryptoReader<W, D> {
+    fn read(&mut self) -> Result<[u8; 32], crate::Error> {
+        Ok(<Self as BytesReader>::read(self, 32)?.try_into().unwrap())
+    }
+
+    fn read_hint(&mut self) -> Result<[u8; 32], crate::Error> {
+        Ok(<Self as BytesReader>::read_hint(self, 32)?
+            .try_into()
+            .unwrap())
+    }
+}
+
+impl<R: Read, D: Digest + FixedOutputReset> BytesReader for RustCryptoReader<R, D> {
+    fn read(&mut self, n: usize) -> Result<Vec<u8>, crate::Error> {
+        let bytes = <Self as BytesReader>::read_hint(self, n)?;
+        Digest::update(&mut self.hasher, &bytes);
+        Ok(bytes)
+    }
+
+    fn read_hint(&mut self, n: usize) -> Result<Vec<u8>, crate::Error> {
+        let mut bytes = vec![0u8; n];
         self.reader
             .read_exact(bytes.as_mut())
             .map_err(|_| crate::Error::Transcript)?;
-        Digest::update(&mut self.hasher, &bytes);
-        bincode::deserialize(&bytes).map_err(|_| crate::Error::Transcript)
+        Ok(bytes)
     }
 }
 
@@ -125,8 +171,9 @@ impl<R: Read, D: Digest + FixedOutputReset + Clone, F: Field, Ext: ExtensionFiel
 
 #[cfg(test)]
 mod test {
-    use crate::transcript::FieldReader;
-    use crate::transcript::{Challenge, FieldWriter};
+    #[cfg(test)]
+    use crate::field::SerializedField;
+    use crate::transcript::{Challenge, Reader, Writer};
     #[cfg(test)]
     use digest::{Digest, FixedOutputReset};
     use p3_baby_bear::BabyBear;
@@ -138,8 +185,13 @@ mod test {
     use rand::Rng;
 
     #[cfg(test)]
-    fn run_test<F: Field, Ext: ExtensionField<F>, D: Digest + FixedOutputReset + Clone>(seed: u64)
-    where
+    fn run_test<
+        F: Field + SerializedField,
+        Ext: ExtensionField<F> + SerializedField,
+        D: Digest + FixedOutputReset + Clone,
+    >(
+        seed: u64,
+    ) where
         rand::distr::StandardUniform: rand::distr::Distribution<F>,
         rand::distr::StandardUniform: rand::distr::Distribution<Ext>,
     {
@@ -152,19 +204,28 @@ mod test {
         let mut els_w = vec![];
         let mut els_ext_w = vec![];
         let mut chs_w = vec![];
+        let mut bytes_w = vec![];
         (0..10).for_each(|_| {
+            use crate::transcript::BytesWriter;
+
             let n_draw = rng_w.random_range(0..10);
             let n_write = rng_w.random_range(0..10);
+            let n_write_ext = rng_w.random_range(0..10);
+            let n_bytes = rng_w.random_range(0..128);
 
             let chs: Vec<Ext> = w.draw_many(n_draw);
             let els: Vec<F> = (0..n_write).map(|_| rng.random()).collect();
-            let els_ext: Vec<Ext> = (0..n_write).map(|_| rng.random()).collect();
+            let els_ext: Vec<Ext> = (0..n_write_ext).map(|_| rng.random()).collect();
+            let bytes: Vec<u8> = (0..n_bytes).map(|_| rng.random()).collect();
+
             w.write_many(&els).unwrap();
             w.write_many(&els_ext).unwrap();
+            <RustCryptoWriter<_, D> as BytesWriter>::write(&mut w, &bytes).unwrap();
 
             els_w.extend(els);
             els_ext_w.extend(els_ext);
             chs_w.extend(chs);
+            bytes_w.extend(bytes);
         });
 
         let data = w.finalize();
@@ -174,17 +235,25 @@ mod test {
         let mut els_r = vec![];
         let mut els_ext_r = vec![];
         let mut chs_r = vec![];
+        let mut bytes_r = vec![];
         (0..10).for_each(|_| {
+            use crate::transcript::BytesReader;
+
             let n_draw = rng_r.random_range(0..10);
             let n_read = rng_r.random_range(0..10);
+            let n_read_ext = rng_r.random_range(0..10);
+            let n_bytes = rng_r.random_range(0..128);
 
             let chs: Vec<Ext> = r.draw_many(n_draw);
             let els: Vec<F> = r.read_many(n_read).unwrap();
-            let els_ext: Vec<Ext> = r.read_many(n_read).unwrap();
+            let els_ext: Vec<Ext> = r.read_many(n_read_ext).unwrap();
+            let bytes: Vec<u8> =
+                <RustCryptoReader<_, D> as BytesReader>::read(&mut r, n_bytes).unwrap();
 
             els_r.extend(els);
             els_ext_r.extend(els_ext);
             chs_r.extend(chs);
+            bytes_r.extend(bytes);
         });
 
         let must_be_err: Result<F, crate::Error> = r.read();
@@ -193,6 +262,7 @@ mod test {
         assert_eq!(els_w, els_r);
         assert_eq!(els_ext_w, els_ext_r);
         assert_eq!(chs_w, chs_r);
+        assert_eq!(bytes_w, bytes_r);
     }
 
     #[test]

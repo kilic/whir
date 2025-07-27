@@ -16,32 +16,42 @@ pub trait Challenge<F: Field, Ext: ExtensionField<F>> {
     }
 }
 
-pub trait FieldWriter<F: Field> {
-    fn write(&mut self, el: F) -> Result<(), crate::Error>;
-    fn write_hint(&mut self, el: F) -> Result<(), crate::Error>;
-    fn write_many(&mut self, el: &[F]) -> Result<(), crate::Error>
+pub trait Writer<T> {
+    fn write(&mut self, el: T) -> Result<(), crate::Error>;
+    fn write_hint(&mut self, el: T) -> Result<(), crate::Error>;
+    fn write_many(&mut self, el: &[T]) -> Result<(), crate::Error>
     where
-        F: Copy,
+        T: Copy,
     {
         el.iter().try_for_each(|&e| self.write(e))
     }
-    fn write_hint_many(&mut self, el: &[F]) -> Result<(), crate::Error>
+    fn write_hint_many(&mut self, el: &[T]) -> Result<(), crate::Error>
     where
-        F: Copy,
+        T: Copy,
     {
         el.iter().try_for_each(|&e| self.write_hint(e))
     }
 }
 
-pub trait FieldReader<F: Field> {
-    fn read(&mut self) -> Result<F, crate::Error>;
-    fn read_hint(&mut self) -> Result<F, crate::Error>;
-    fn read_many(&mut self, n: usize) -> Result<Vec<F>, crate::Error> {
+pub trait Reader<T> {
+    fn read(&mut self) -> Result<T, crate::Error>;
+    fn read_hint(&mut self) -> Result<T, crate::Error>;
+    fn read_many(&mut self, n: usize) -> Result<Vec<T>, crate::Error> {
         (0..n).map(|_| self.read()).collect::<Result<Vec<_>, _>>()
     }
-    fn read_hint_many(&mut self, n: usize) -> Result<Vec<F>, crate::Error> {
+    fn read_hint_many(&mut self, n: usize) -> Result<Vec<T>, crate::Error> {
         (0..n)
             .map(|_| self.read_hint())
             .collect::<Result<Vec<_>, _>>()
     }
+}
+
+pub trait BytesWriter {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), crate::Error>;
+    fn write_hint(&mut self, bytes: &[u8]) -> Result<(), crate::Error>;
+}
+
+pub trait BytesReader {
+    fn read(&mut self, n: usize) -> Result<Vec<u8>, crate::Error>;
+    fn read_hint(&mut self, n: usize) -> Result<Vec<u8>, crate::Error>;
 }

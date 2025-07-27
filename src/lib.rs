@@ -1,11 +1,15 @@
+pub mod data;
+pub mod merkle;
 pub mod poly;
 pub mod transcript;
 pub mod utils;
+pub mod field;
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum Error {
     Transcript,
     Verify,
+    IO,
 }
 
 #[cfg(test)]
