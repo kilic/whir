@@ -2,6 +2,9 @@ use itertools::Itertools;
 use p3_field::{ExtensionField, Field};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 
+pub mod arithmetic;
+pub use arithmetic::*;
+
 pub fn n_rand<F>(rng: impl rand::RngCore, n: usize) -> Vec<F>
 where
     rand::distr::StandardUniform: rand::distr::Distribution<F>,

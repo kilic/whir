@@ -104,9 +104,9 @@ impl<F: Field> Point<F> {
         let k = poly.k();
         assert_eq!(k, self.len());
 
-        // if poly.is_constant() {
-        //     return poly[0].into();
-        // }
+        if let Some(constant) = poly.constant() {
+            return constant.into();
+        }
 
         let mid = 1 << (k - 1);
         let (lo, hi) = poly.split_at(mid);
@@ -136,9 +136,9 @@ impl<F: Field> Point<F> {
         let k = poly.k();
         assert_eq!(k, self.len());
 
-        // if poly.is_constant() {
-        //     return poly[0].into();
-        // }
+        if let Some(constant) = poly.constant() {
+            return constant.into();
+        }
 
         let mut bss = unsafe_allocate_zero_vec(1 << (k - 1));
         bss[0] = F::ONE;

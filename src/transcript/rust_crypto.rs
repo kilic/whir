@@ -100,7 +100,7 @@ impl<
     > Challenge<F, Ext> for RustCryptoWriter<W, D>
 {
     fn draw(&mut self) -> Ext {
-        draw_ext_field(&mut self.hasher)
+        draw_ext_field::<F, Ext, _>(&mut self.hasher)
     }
 }
 
@@ -165,7 +165,7 @@ impl<R: Read, D: Digest + FixedOutputReset + Clone, F: Field, Ext: ExtensionFiel
     Challenge<F, Ext> for RustCryptoReader<R, D>
 {
     fn draw(&mut self) -> Ext {
-        draw_ext_field(&mut self.hasher)
+        draw_ext_field::<F, Ext, _>(&mut self.hasher)
     }
 }
 
@@ -271,6 +271,7 @@ mod test {
             run_test::<Goldilocks, Goldilocks, sha2::Sha256>(i);
             run_test::<Goldilocks, BinomialExtensionField<Goldilocks, 2>, sha2::Sha256>(i);
             run_test::<BabyBear, BabyBear, sha2::Sha256>(i);
+            run_test::<BabyBear, BinomialExtensionField<BabyBear, 4>, sha2::Sha256>(i);
             run_test::<KoalaBear, KoalaBear, sha2::Sha256>(i);
             run_test::<KoalaBear, BinomialExtensionField<KoalaBear, 4>, sha2::Sha256>(i);
         }
