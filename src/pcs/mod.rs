@@ -3,6 +3,7 @@ use p3_field::{ExtensionField, Field};
 use crate::poly::{Point, Poly};
 
 pub mod sumcheck;
+pub mod params;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Claim<F> {
