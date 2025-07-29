@@ -1,30 +1,25 @@
 use crate::{
-    data::DataOwn,
     merkle::{to_interleaved_index, verify_merkle_proof, Compress, Hasher},
     transcript::{Reader, Writer},
+    utils::log2_strict,
     Error,
 };
-use rayon::{
-    iter::{IndexedParallelIterator, ParallelIterator},
-    slice::ParallelSlice,
-};
+use p3_field::Field;
+use p3_matrix::{dense::RowMajorMatrix, Matrix};
+use rayon::{iter::ParallelIterator, slice::ParallelSlice};
 use std::fmt::Debug;
 
 use super::MerkleTree;
 
 #[derive(Debug)]
-pub struct MatrixCommitmentData<T, Digest> {
-    pub(crate) data: DataOwn<T>,
+pub struct MatrixCommitmentData<F: Field, Digest> {
+    pub(crate) data: RowMajorMatrix<F>,
     pub(crate) layers: Vec<Vec<Digest>>,
 }
 
-impl<T, Digest: Clone> MatrixCommitmentData<T, Digest> {
+impl<F: Field, Digest: Clone> MatrixCommitmentData<F, Digest> {
     pub fn k(&self) -> usize {
-        self.data.k()
-    }
-
-    pub fn row(&self, index: usize) -> &[T] {
-        self.data.row(index)
+        log2_strict(self.data.height())
     }
 
     pub fn root(&self) -> Digest {
@@ -32,12 +27,12 @@ impl<T, Digest: Clone> MatrixCommitmentData<T, Digest> {
     }
 }
 
-pub trait MatrixCommitment<F> {
+pub trait MatrixCommitment<F: Field> {
     type Digest: Copy + Debug;
     fn commit<Transcript>(
         &self,
         transcript: &mut Transcript,
-        data: DataOwn<F>,
+        data: RowMajorMatrix<F>,
     ) -> Result<MatrixCommitmentData<F, Self::Digest>, Error>
     where
         Transcript: Writer<Self::Digest>;
@@ -64,7 +59,7 @@ pub trait MatrixCommitment<F> {
         Transcript: Reader<F> + Reader<Self::Digest>;
 }
 
-impl<F, Digest, H, C> MatrixCommitment<F> for MerkleTree<F, Digest, H, C>
+impl<F: Field, Digest, H, C> MatrixCommitment<F> for MerkleTree<F, Digest, H, C>
 where
     F: Copy + Clone + Debug + Send + Sync,
     Digest: Copy + Clone + Debug + Send + Sync + Eq + PartialEq,
@@ -75,20 +70,20 @@ where
     fn commit<Transcript>(
         &self,
         transcript: &mut Transcript,
-        data: DataOwn<F>,
+        data: RowMajorMatrix<F>,
     ) -> Result<MatrixCommitmentData<F, Self::Digest>, Error>
     where
         Transcript: Writer<Self::Digest>,
     {
-        let (l, r) = data.split_half();
+        let (l, r) = data.split_rows(data.height() / 2);
         let layer0 = l
-            .par_iter()
-            .zip(r.par_iter())
+            .par_row_slices()
+            .zip(r.par_row_slices())
             .flat_map(|(l, r)| [self.h.hash_iter(l), self.h.hash_iter(r)])
             .collect::<Vec<_>>();
 
         let mut layers = vec![layer0];
-        for _ in 0..data.k() {
+        for _ in 0..log2_strict(data.height()) {
             let next_layer = layers
                 .last()
                 .unwrap()
@@ -114,11 +109,21 @@ where
         Transcript: Writer<F> + Writer<Digest>,
     {
         let k = comm.k();
-        let leaf = comm.data.row(index).to_vec();
+        let leaf = comm
+            .data
+            .row(index)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>();
         transcript.write_hint_many(&leaf)?;
 
         let mid = 1 << (k - 1);
-        let sibling = comm.data.row(index ^ mid).to_vec();
+        let sibling = comm
+            .data
+            .row(index ^ mid)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>();
         let index = to_interleaved_index(k, index);
 
         let mut witness = vec![];
@@ -170,7 +175,6 @@ where
 #[cfg(test)]
 mod test {
     use crate::{
-        data::DataOwn,
         merkle::{matrix::MatrixCommitment, MerkleTree, RustCrypto},
         transcript::{
             rust_crypto::{RustCryptoReader, RustCryptoWriter},
@@ -179,6 +183,7 @@ mod test {
         utils::n_rand,
     };
     use p3_goldilocks::Goldilocks;
+    use p3_matrix::dense::RowMajorMatrix;
 
     #[test]
     fn test_mat_com() {
@@ -197,7 +202,7 @@ mod test {
         let width = 1;
         let mut rng = crate::test::rng(1);
         let coeffs = n_rand(&mut rng, 1 << k);
-        let data = DataOwn::new(width, coeffs);
+        let data = RowMajorMatrix::new(coeffs, width);
         let comm_data = mat_comm.commit(&mut transcript, data).unwrap();
         (0..1 << k).for_each(|index| {
             mat_comm.query(&mut transcript, index, &comm_data).unwrap();
