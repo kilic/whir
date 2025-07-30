@@ -60,11 +60,11 @@ impl<F: Clone> Point<F> {
 }
 
 impl<F: Field> Point<F> {
-    pub fn expand(k: usize, mut z: F) -> Self {
+    pub fn expand(k: usize, mut var: F) -> Self {
         let mut point = (0..k)
             .map(|_| {
-                let ret = z;
-                z = z.square();
+                let ret = var;
+                var = var.square();
                 ret
             })
             .collect::<Vec<_>>();
@@ -250,15 +250,8 @@ impl<F: Field> Poly<F> {
         point.eval_coeffs(self)
     }
 
-    pub fn evals(&self) -> &[F] {
+    pub fn values(&self) -> &[F] {
         &self.values
-    }
-
-    pub fn from_evals(evals: &[F]) -> Self {
-        assert!(!evals.is_empty());
-        Self {
-            values: evals.to_vec(),
-        }
     }
 
     pub fn to_coeffs(mut self) -> Poly<F> {
