@@ -56,7 +56,7 @@ pub struct Whir<
 
 impl<
         F: TwoAdicField,
-        Ext: ExtensionField<F>,
+        Ext: ExtensionField<F> + TwoAdicField,
         MCom: MatrixCommitment<F>,
         MComExt: MatrixCommitment<Ext>,
     > Whir<F, Ext, MCom, MComExt>

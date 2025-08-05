@@ -2,6 +2,7 @@ use crate::field::SerializedField;
 use crate::transcript::BytesReader;
 use crate::transcript::BytesWriter;
 use crate::transcript::Challenge;
+use crate::transcript::ChallengeBits;
 use crate::transcript::Reader;
 use crate::transcript::Writer;
 use digest::Digest;
@@ -37,6 +38,13 @@ fn draw_ext_field<F: Field, Ext: ExtensionField<F>, D: Digest + FixedOutputReset
         draw_field::<F, _>(hasher.clone())
     }))
     .unwrap()
+}
+
+fn draw_bits<D: Digest + FixedOutputReset + Clone>(hasher: &mut D, bit_size: usize) -> usize {
+    Digest::update(hasher, [RUST_CRYPTO_UPDATE]);
+    let bytes = hasher.clone().finalize().to_vec();
+    let ret = usize::from_le_bytes(bytes[0..usize::BITS as usize / 8].try_into().unwrap());
+    ret & ((1 << bit_size) - 1)
 }
 
 impl<W: Write + Default, D: Digest + FixedOutputReset + Clone> RustCryptoWriter<W, D> {
@@ -104,6 +112,14 @@ impl<
     }
 }
 
+impl<W: Write + Default, D: Digest + FixedOutputReset + Clone> ChallengeBits
+    for RustCryptoWriter<W, D>
+{
+    fn draw(&mut self, bit_size: usize) -> usize {
+        draw_bits(&mut self.hasher, bit_size)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RustCryptoReader<R: Read, D: Digest + FixedOutputReset> {
     hasher: D,
@@ -166,6 +182,14 @@ impl<R: Read, D: Digest + FixedOutputReset + Clone, F: Field, Ext: ExtensionFiel
 {
     fn draw(&mut self) -> Ext {
         draw_ext_field::<F, Ext, _>(&mut self.hasher)
+    }
+}
+
+impl<R: Read + Default, D: Digest + FixedOutputReset + Clone> ChallengeBits
+    for RustCryptoReader<R, D>
+{
+    fn draw(&mut self, bit_size: usize) -> usize {
+        draw_bits(&mut self.hasher, bit_size)
     }
 }
 

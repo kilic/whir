@@ -1,4 +1,4 @@
-use crate::utils::{log2_strict, n_rand, unsafe_allocate_zero_vec, TwoAdicSlice};
+use crate::utils::{log2_strict, n_rand, unsafe_allocate_zero_vec, TwoAdicSlice, VecOps};
 use itertools::Itertools;
 use p3_field::{ExtensionField, Field};
 use rand::distr::{Distribution, StandardUniform};
@@ -61,15 +61,14 @@ impl<F: Clone> Point<F> {
 
 impl<F: Field> Point<F> {
     pub fn expand(k: usize, mut var: F) -> Self {
-        let mut point = (0..k)
+        (0..k)
             .map(|_| {
                 let ret = var;
                 var = var.square();
                 ret
             })
-            .collect::<Vec<_>>();
-        point.reverse();
-        point.into()
+            .collect::<Vec<_>>()
+            .into()
     }
 
     pub fn hypercube(value: usize, k: usize) -> Self {
@@ -246,6 +245,10 @@ impl<F: Field> Poly<F> {
         point.eval_lagrange(self)
     }
 
+    pub fn eval_univariate<Ext: ExtensionField<F>>(&self, point: Ext) -> Ext {
+        self.values.rhorner(point)
+    }
+
     pub fn eval_coeffs<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
         point.eval_coeffs(self)
     }
@@ -303,6 +306,13 @@ impl<F: Field> Poly<F> {
             .collect::<Vec<_>>()
             .into()
     }
+
+    // pub fn fix_var_ext_rev<Ext: ExtensionField<F>>(&self, zi: Ext) -> Poly<Ext> {
+    //     self.chunks(2)
+    //         .map(|chunk| zi * (chunk[1] - chunk[0]) + chunk[0])
+    //         .collect::<Vec<_>>()
+    //         .into()
+    // }
 }
 
 #[cfg(test)]
@@ -311,12 +321,15 @@ mod test {
         poly::{Point, Poly},
         utils::VecOps,
     };
+    use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
     use p3_field::extension::BinomialExtensionField;
     use p3_goldilocks::Goldilocks;
 
     type F = Goldilocks;
     type Ext = BinomialExtensionField<F, 2>;
     use p3_field::PrimeCharacteristicRing;
+    use p3_matrix::dense::RowMajorMatrix;
+    use rand::Rng;
 
     #[test]
     fn test_eval() {
@@ -356,6 +369,73 @@ mod test {
             let e1 = poly2.constant().unwrap();
             assert_eq!(e0, e1);
             let e1 = poly0.dot(&point.eq(Ext::ONE));
+            assert_eq!(e0, e1);
+        }
+    }
+
+    #[test]
+    fn test_domain() {
+        type F = p3_goldilocks::Goldilocks;
+        use p3_field::TwoAdicField;
+
+        let mut rng = &mut crate::test::rng(1);
+        let k = 4usize;
+
+        let poly: Poly<F> = Poly::rand(&mut rng, k);
+        let poly_in_coeffs: Poly<F> = poly.clone().to_coeffs();
+        let extend = 3;
+        let rate = poly.k() + extend;
+
+        let size = 1 << rate;
+        let mut padded: Vec<F> = crate::utils::unsafe_allocate_zero_vec(size);
+        padded[..poly.len()].copy_from_slice(&poly);
+
+        let mat = RowMajorMatrix::new(padded.clone(), 1);
+
+        let cw = Radix2DitParallel::default().dft_algebra_batch(mat);
+        let cw = &cw.values;
+
+        let omega = F::two_adic_generator(rate);
+        for i in 0..size {
+            let wi = omega.exp_u64(i as u64);
+            let ei = poly.eval_univariate(wi);
+            assert_eq!(ei, cw[i]);
+
+            let point = Point::<F>::expand(poly.k(), wi);
+            let u0 = poly.eval_lagrange(&point);
+            let u1 = poly_in_coeffs.eval_univariate::<F>(wi);
+            assert_eq!(u0, u1);
+        }
+    }
+
+    #[test]
+    fn test_univariate() {
+        type F = p3_goldilocks::Goldilocks;
+
+        let mut rng = &mut crate::test::rng(1);
+        let k = 4usize;
+
+        for _ in 0..1000 {
+            let poly_in_lagrange: Poly<F> = Poly::rand(&mut rng, k);
+            let poly_in_coeffs = poly_in_lagrange.clone().to_coeffs();
+            let r: F = rng.random();
+            let point = Point::<F>::expand(poly_in_coeffs.k(), r);
+            let e0 = poly_in_lagrange.eval_lagrange(&point);
+            let e1 = poly_in_coeffs.eval_coeffs(&point);
+            assert_eq!(e0, e1);
+            let e1 = poly_in_coeffs.eval_univariate(r);
+            assert_eq!(e0, e1);
+        }
+
+        for _ in 0..1000 {
+            let poly_in_coeffs: Poly<F> = Poly::rand(&mut rng, k);
+            let poly_in_lagrange = poly_in_coeffs.clone().to_lagrange();
+            let r: F = rng.random();
+            let point = Point::<F>::expand(poly_in_lagrange.k(), r);
+            let e0 = poly_in_coeffs.eval_coeffs(&point);
+            let e1 = poly_in_lagrange.eval_lagrange(&point);
+            assert_eq!(e0, e1);
+            let e1 = poly_in_coeffs.eval_univariate(r);
             assert_eq!(e0, e1);
         }
     }
