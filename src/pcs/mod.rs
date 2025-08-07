@@ -1,9 +1,5 @@
+use crate::poly::{Point, Poly};
 use p3_field::{ExtensionField, Field};
-
-use crate::{
-    poly::{Point, Poly},
-    transcript::{Challenge, Reader, Writer},
-};
 
 pub mod params;
 pub mod stir;
@@ -11,61 +7,31 @@ pub mod sumcheck;
 pub mod whir;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Claim<F: Field> {
+pub struct Claim<F: Field, Ext: ExtensionField<F>> {
     pub(crate) point: Point<F>,
-    pub(crate) eval: F,
+    pub(crate) eval: Ext,
 }
 
-impl<F: Field> Claim<F> {
-    pub fn new(point: Point<F>, eval: F) -> Self {
+impl<F: Field, Ext: ExtensionField<F>> Claim<F, Ext> {
+    pub fn new(point: Point<F>, eval: Ext) -> Self {
         Self { point, eval }
     }
 
     pub fn k(&self) -> usize {
         self.point.len()
     }
-}
 
-pub(crate) fn make_claims<
-    Transcript,
-    F: Field,
-    Ex0: ExtensionField<F>,
-    Ex1: ExtensionField<Ex0> + ExtensionField<F>,
->(
-    transcript: &mut Transcript,
-    num_points: usize,
-    poly: &Poly<Ex0>,
-) -> Result<Vec<Claim<Ex1>>, crate::Error>
-where
-    Transcript: Challenge<F, Ex1> + Writer<Ex1>,
-{
-    (0..num_points)
-        .map(|_| {
-            let point = Point::expand(poly.k(), transcript.draw());
-            let eval = poly.eval_lagrange(&point);
-            let claim = Claim { point, eval };
-            transcript.write(claim.eval)?;
-            Ok(claim)
-        })
-        .collect::<Result<Vec<_>, _>>()
-}
+    pub fn eq(&self) -> Poly<F> {
+        self.point.eq(F::ONE)
+    }
 
-pub(crate) fn get_claims<Transcript, F: Field, Ext: ExtensionField<F>>(
-    transcript: &mut Transcript,
-    k: usize,
-    n: usize,
-) -> Result<Vec<Claim<Ext>>, crate::Error>
-where
-    Transcript: Reader<Ext> + Challenge<F, Ext>,
-{
-    (0..n)
-        .map(|_| {
-            let var: Ext = transcript.draw();
-            let point = Point::expand(k, var);
-            let eval = transcript.read()?;
-            Ok(Claim::new(point, eval))
-        })
-        .collect::<Result<Vec<_>, _>>()
+    pub fn eval(&self) -> &Ext {
+        &self.eval
+    }
+
+    pub fn point(&self) -> Point<F> {
+        self.point.clone()
+    }
 }
 
 #[cfg(test)]
@@ -90,7 +56,7 @@ mod test {
         for folding in 0..k {
             let width = 1 << folding;
 
-            // rearrange the coefficients since we will fix variables backwards
+            // rearrange coefficients since variables are fixed in backwards order
             let mut transposed = vec![F::ZERO; size];
             transpose::transpose(&poly_in_coeffs, &mut transposed, size / width, width);
 
@@ -102,8 +68,8 @@ mod test {
                 let mut padded: Vec<F> = crate::utils::unsafe_allocate_zero_vec(pad_size);
                 padded[..poly_in_coeffs.len()].copy_from_slice(&transposed);
 
-                // encode and find the leaves that would be committed to
-                let leaves = Radix2DitParallel::default()
+                // encode and find the codeword that would be committed to
+                let codeword = Radix2DitParallel::default()
                     .dft_algebra_batch(RowMajorMatrix::new(padded, width));
 
                 // simulate sumcheck folding
@@ -125,7 +91,7 @@ mod test {
                 let omega = F::two_adic_generator(domain_size);
 
                 // check for each index
-                for (index, row) in leaves.rows().enumerate() {
+                for (index, row) in codeword.rows().enumerate() {
                     let wi = omega.exp_u64(index as u64);
                     let point = Point::<F>::expand(poly_in_coeffs.k(), wi);
                     let e0 = poly_in_coeffs.eval_coeffs(&point);

@@ -85,3 +85,42 @@ pub(crate) fn interpolate<F: Field, Ext: ExtensionField<F>>(
         final_poly
     }
 }
+
+pub fn par_horner<F: Field, E: ExtensionField<F>>(poly: &[F], point: E) -> E {
+    // taken from pse/halo2
+    let n = poly.len();
+    let num_threads = rayon::current_num_threads();
+    if n * 2 < num_threads {
+        poly.iter()
+            .rfold(E::ZERO, |acc, &coeff| acc * point + coeff)
+    } else {
+        let chunk_size = (n + num_threads - 1) / num_threads;
+        let mut parts = vec![E::ZERO; num_threads];
+        rayon::scope(|scope| {
+            for (chunk_idx, (out, poly)) in
+                parts.chunks_mut(1).zip(poly.chunks(chunk_size)).enumerate()
+            {
+                scope.spawn(move |_| {
+                    out[0] =
+                        poly.iter().horner(point) * point.exp_u64((chunk_idx * chunk_size) as u64);
+                });
+            }
+        });
+        parts.iter().fold(E::ZERO, |acc, coeff| acc + *coeff)
+    }
+}
+
+pub trait VecOps<F: Field> {
+    fn horner<E: ExtensionField<F>>(self, x: E) -> E;
+}
+
+impl<I, F> VecOps<F> for I
+where
+    F: Field,
+    I: DoubleEndedIterator,
+    I::Item: std::ops::Deref<Target = F>,
+{
+    fn horner<E: ExtensionField<F>>(self, x: E) -> E {
+        self.rfold(E::ZERO, |acc, coeff| acc * x + *coeff)
+    }
+}

@@ -1,4 +1,4 @@
-use crate::utils::{log2_strict, n_rand, unsafe_allocate_zero_vec, TwoAdicSlice, VecOps};
+use crate::utils::{log2_strict, n_rand, unsafe_allocate_zero_vec, TwoAdicSlice};
 use itertools::Itertools;
 use p3_field::{ExtensionField, Field};
 use rand::distr::{Distribution, StandardUniform};
@@ -96,16 +96,17 @@ impl<F: Field> Point<F> {
         self.iter().map(|&z| z.into()).collect_vec().into()
     }
 
-    pub fn eval_lagrange<BaseField: Field>(&self, poly: &Poly<BaseField>) -> F
+    pub fn eval_lagrange<BaseField: Field>(&self, poly: &[BaseField]) -> F
     where
         F: ExtensionField<BaseField>,
     {
-        let k = poly.k();
-        assert_eq!(k, self.len());
-
-        if let Some(constant) = poly.constant() {
+        let constant = (poly.len() == 1).then_some(*poly.first().unwrap());
+        if let Some(constant) = constant {
             return constant.into();
         }
+
+        let k = poly.k();
+        assert_eq!(k, self.len());
 
         let mid = 1 << (k - 1);
         let (lo, hi) = poly.split_at(mid);
@@ -128,24 +129,55 @@ impl<F: Field> Point<F> {
         poly[0]
     }
 
-    pub fn eval_coeffs<BaseField: Field>(&self, poly: &Poly<BaseField>) -> F
-    where
-        F: ExtensionField<BaseField>,
-    {
-        let k = poly.k();
-        assert_eq!(k, self.len());
-
-        if let Some(constant) = poly.constant() {
+    pub fn eval_lagrange_ext<Ext: ExtensionField<F>>(&self, poly: &[Ext]) -> Ext {
+        let constant = (poly.len() == 1).then_some(*poly.first().unwrap());
+        if let Some(constant) = constant {
             return constant.into();
         }
 
+        let k = poly.k();
+        assert_eq!(k, self.len());
+
+        let mid = 1 << (k - 1);
+        let (lo, hi) = poly.split_at(mid);
+        let mut poly: Vec<Ext> = unsafe_allocate_zero_vec(mid);
+        let z0 = *self.last().unwrap();
+        lo.par_iter()
+            .zip_eq(hi.par_iter())
+            .zip_eq(poly.par_iter_mut())
+            .for_each(|((&a0, &a1), t)| *t = (a1 - a0) * z0 + a0);
+
+        for &zi in self.iter().rev().skip(1) {
+            let mid = poly.len() / 2;
+            let (lo, hi) = poly.split_at_mut(mid);
+            lo.par_iter_mut()
+                .zip(hi.par_iter())
+                .for_each(|(a0, a1)| *a0 += (*a1 - *a0) * zi);
+            poly.truncate(mid);
+        }
+        assert_eq!(poly.k(), 0);
+        poly[0]
+    }
+
+    pub fn eval_coeffs<BaseField: Field>(&self, poly: &[BaseField]) -> F
+    where
+        F: ExtensionField<BaseField>,
+    {
+        let constant = (poly.len() == 1).then_some(*poly.first().unwrap());
+        if let Some(constant) = constant {
+            return constant.into();
+        }
+
+        let k = poly.k();
+        assert_eq!(k, self.len());
+
         let mut bss = unsafe_allocate_zero_vec(1 << (k - 1));
         bss[0] = F::ONE;
-        let mut sum = (*poly.values.first().unwrap()).into();
+        let mut sum = (*poly.first().unwrap()).into();
         for (i, &zi) in self.iter().enumerate() {
             sum += bss
                 .par_iter()
-                .zip(poly.values.par_iter().skip(1 << (i)))
+                .zip(poly.par_iter().skip(1 << (i)))
                 .take(1 << (i))
                 .map(|(&u0, &u1)| u0 * u1)
                 .sum::<F>()
@@ -245,8 +277,16 @@ impl<F: Field> Poly<F> {
         point.eval_lagrange(self)
     }
 
+    pub fn eval_lagrange_ext<BaseField: Field>(&self, point: &Point<BaseField>) -> F
+    where
+        F: ExtensionField<BaseField>,
+    {
+        point.eval_lagrange_ext(self)
+    }
+
     pub fn eval_univariate<Ext: ExtensionField<F>>(&self, point: Ext) -> Ext {
-        self.values.rhorner(point)
+        // self.values.iter().horner(point)
+        crate::utils::par_horner(&self.values, point)
     }
 
     pub fn eval_coeffs<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
@@ -258,34 +298,32 @@ impl<F: Field> Poly<F> {
     }
 
     pub fn to_coeffs(mut self) -> Poly<F> {
-        self.values
-            .par_chunks_mut(2)
+        self.par_chunks_mut(2)
             .for_each(|chunk| chunk[1] -= chunk[0]);
 
         for i in 2..=self.k() {
             let chunk_size = 1 << i;
-            self.values.par_chunks_mut(chunk_size).for_each(|chunk| {
+            self.par_chunks_mut(chunk_size).for_each(|chunk| {
                 let mid = chunk_size >> 1;
                 (mid..chunk_size).for_each(|j| chunk[j] -= chunk[j - mid]);
             });
         }
 
-        self.values.into()
+        self
     }
 
     pub fn to_lagrange(mut self) -> Poly<F> {
-        self.values
-            .par_chunks_mut(2)
+        self.par_chunks_mut(2)
             .for_each(|chunk| chunk[1] += chunk[0]);
 
         for i in 2..=self.k() {
             let chunk_size = 1 << i;
-            self.values.par_chunks_mut(chunk_size).for_each(|chunk| {
+            self.par_chunks_mut(chunk_size).for_each(|chunk| {
                 let mid = chunk_size >> 1;
                 (mid..chunk_size).for_each(|j| chunk[j] += chunk[j - mid]);
             });
         }
-        self.values.into()
+        self
     }
 
     pub fn fix_var(&mut self, zi: F) {
@@ -306,21 +344,11 @@ impl<F: Field> Poly<F> {
             .collect::<Vec<_>>()
             .into()
     }
-
-    // pub fn fix_var_ext_rev<Ext: ExtensionField<F>>(&self, zi: Ext) -> Poly<Ext> {
-    //     self.chunks(2)
-    //         .map(|chunk| zi * (chunk[1] - chunk[0]) + chunk[0])
-    //         .collect::<Vec<_>>()
-    //         .into()
-    // }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        poly::{Point, Poly},
-        utils::VecOps,
-    };
+    use crate::poly::{Point, Poly};
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
     use p3_field::extension::BinomialExtensionField;
     use p3_goldilocks::Goldilocks;
@@ -368,7 +396,11 @@ mod test {
 
             let e1 = poly2.constant().unwrap();
             assert_eq!(e0, e1);
-            let e1 = poly0.dot(&point.eq(Ext::ONE));
+            let e1 = poly0
+                .iter()
+                .zip(point.eq(Ext::ONE).iter())
+                .map(|(&coeff, &eq)| eq * coeff)
+                .sum::<Ext>();
             assert_eq!(e0, e1);
         }
     }

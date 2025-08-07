@@ -1,7 +1,3 @@
-use itertools::Itertools;
-use p3_field::{ExtensionField, Field};
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
-
 pub mod arithmetic;
 pub use arithmetic::*;
 
@@ -58,43 +54,28 @@ pub(crate) fn unsafe_allocate_zero_vec<F: Default + Sized>(size: usize) -> Vec<F
     result
 }
 
-impl<V: Field> VecOps<V> for Vec<V> {}
-impl<V: Field> VecOps<V> for &[V] {}
-impl<V: Field> VecOps<V> for &mut [V] {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p3_field::extension::BinomialExtensionField;
+    use p3_goldilocks::Goldilocks;
+    use rand::Rng;
 
-pub trait VecOps<F: Field>: core::ops::Deref<Target = [F]> {
-    fn hadamard<E: ExtensionField<F>>(&self, other: &[E]) -> Vec<E> {
-        self.iter()
-            .zip_eq(other.iter())
-            .map(|(&a, &b)| b * a)
-            .collect()
-    }
+    #[test]
+    fn test_par_horner() {
+        type F = Goldilocks;
+        type Ext = BinomialExtensionField<F, 2>;
 
-    fn dot<E: ExtensionField<F>>(&self, other: &[E]) -> E {
-        assert_eq!(self.len(), other.len());
-        self.iter().zip_eq(other.iter()).map(|(&a, &b)| b * a).sum()
-    }
+        let rng = &mut crate::test::rng(1);
+        let k_max = 16;
 
-    fn par_hadamard<E: ExtensionField<F>>(&self, other: &[E]) -> Vec<E> {
-        self.par_iter()
-            .zip_eq(other.par_iter())
-            .map(|(&a, &b)| b * a)
-            .collect()
-    }
-
-    fn par_dot<E: ExtensionField<F>>(&self, other: &[E]) -> E {
-        assert_eq!(self.len(), other.len());
-        self.par_iter()
-            .zip_eq(other.par_iter())
-            .map(|(&a, &b)| b * a)
-            .sum()
-    }
-
-    fn horner<E: ExtensionField<F>>(&self, x: E) -> E {
-        self.iter().fold(E::ZERO, |acc, &coeff| acc * x + coeff)
-    }
-
-    fn rhorner<E: ExtensionField<F>>(&self, x: E) -> E {
-        self.iter().rfold(E::ZERO, |acc, &coeff| acc * x + coeff)
+        let poly: Vec<F> = (0..(1 << k_max)).map(|_| rng.random()).collect();
+        for k in 0..15 {
+            let poly = &poly[..(1 << k)];
+            let x = rng.random::<Ext>();
+            let e0 = poly.iter().horner(x);
+            let e1 = par_horner(poly, x);
+            assert_eq!(e0, e1);
+        }
     }
 }

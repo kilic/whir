@@ -12,16 +12,16 @@ fn extrapolate<F: Field, EF: ExtensionField<F>>(evals: &[F], target: EF) -> EF {
     let points = (0..evals.len())
         .map(|i| F::from_usize(i))
         .collect::<Vec<_>>();
-    let mut poly = crate::utils::arithmetic::interpolate(&points, evals);
-    poly.reverse();
-    poly.horner(target)
+    crate::utils::arithmetic::interpolate(&points, evals)
+        .iter()
+        .horner(target)
 }
 
-fn eval_eq_xy<F: Field>(x: &[F], y: &[F]) -> F {
+fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &[F], y: &[Ext]) -> Ext {
     assert_eq!(x.len(), y.len());
     x.par_iter()
         .zip(y.par_iter())
-        .map(|(&xi, &yi)| (xi * yi).double() - xi - yi + F::ONE)
+        .map(|(&xi, &yi)| (yi * xi).double() - xi - yi + F::ONE)
         .product()
 }
 
@@ -94,7 +94,6 @@ where
 
 pub struct Sumcheck<F: Field, Ext: ExtensionField<F>> {
     k: usize,
-    ch: Ext,
     sum: Ext,
     rs: Point<Ext>,
     eq: Poly<Ext>,
@@ -134,8 +133,9 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         transcript: &mut Transcript,
         k: usize,
         d: usize,
-        ch: Ext,
-        claims: &[Claim<Ext>],
+        alpha: Ext,
+
+        claims_ext: &[Claim<Ext, Ext>],
         poly: &Poly<F>,
     ) -> Result<Self, crate::Error>
     where
@@ -143,24 +143,20 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
     {
         assert_eq!(poly.k(), k);
-        assert!(claims.iter().all(|o| o.k() == k));
+        assert!(claims_ext.iter().all(|o| o.k() == k));
         assert!(d > 0);
 
-        let mut sum = claims.iter().map(|o| o.eval).collect::<Vec<_>>().horner(ch);
+        let mut sum = claims_ext.iter().map(Claim::<Ext, Ext>::eval).horner(alpha) * alpha;
 
-        let eqs = claims
-            .iter()
-            .map(|o| o.point.eq(Ext::ONE))
-            .collect::<Vec<_>>();
+        let eqs_ext = claims_ext.iter().map(Claim::eq).collect::<Vec<_>>();
 
         let mut eq: Poly<_> = (0..1 << k)
-            .map(|row| eqs.iter().map(|eq| eq[row]).collect::<Vec<_>>().horner(ch))
+            .map(|i| eqs_ext.iter().map(|eq| &eq[i]).horner(alpha) * alpha)
             .collect::<Vec<_>>()
             .into();
 
         // first round
         let (mut poly, r) = round_inner_ext(transcript, &mut sum, poly, &mut eq)?;
-
         let mut rs: Point<Ext> = vec![r].into();
 
         #[cfg(debug_assertions)]
@@ -188,7 +184,6 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
 
         Ok(Self {
             k,
-            ch,
             sum,
             rs,
             eq,
@@ -201,28 +196,29 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         &mut self,
         transcript: &mut Transcript,
         d: usize,
-        claims: &[Claim<Ext>],
+        alpha: Ext,
+        claims_base: &[Claim<F, Ext>],
+        claims_ext: &[Claim<Ext, Ext>],
     ) -> Result<Point<Ext>, crate::Error>
     where
         Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
     {
-        assert!(claims.iter().all(|o| o.k() == self.k()));
+        assert!(claims_base.iter().all(|o| o.k() == self.k()));
+        assert!(claims_ext.iter().all(|o| o.k() == self.k()));
 
-        self.sum = std::iter::once(self.sum)
-            .chain(claims.iter().map(|o| o.eval))
-            .collect::<Vec<_>>()
-            .horner(self.ch);
+        self.sum = std::iter::once(&self.sum)
+            .chain(claims_base.iter().map(Claim::<F, Ext>::eval))
+            .chain(claims_ext.iter().map(Claim::<Ext, Ext>::eval))
+            .horner(alpha);
 
-        let eqs = claims
-            .iter()
-            .map(|o| o.point.eq(Ext::ONE))
-            .collect::<Vec<_>>();
+        let eqs_base = claims_base.iter().map(Claim::eq).collect::<Vec<_>>();
+        let eqs_ext = claims_ext.iter().map(Claim::eq).collect::<Vec<_>>();
 
+        let alpha_shift = alpha.exp_u64(eqs_base.len() as u64);
         self.eq.iter_mut().enumerate().for_each(|(i, cur)| {
-            *cur = std::iter::once(*cur)
-                .chain(eqs.iter().map(|eq| eq[i]).collect::<Vec<_>>())
-                .collect::<Vec<_>>()
-                .horner(self.ch);
+            *cur += (eqs_base.iter().map(|eq| &eq[i]).horner(alpha)
+                + eqs_ext.iter().map(|eq| &eq[i]).horner(alpha) * alpha_shift)
+                * alpha;
         });
 
         let rs = (0..d)
@@ -236,33 +232,51 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
 }
 
 #[derive(Debug, Clone)]
-struct MultiRound<F: Field> {
-    points: Vec<Point<F>>,
-    rs: Point<F>,
+struct MultiRound<F: Field, Ext: ExtensionField<F>> {
+    points_base: Vec<Point<F>>,
+    points_ext: Vec<Point<Ext>>,
+    rs: Point<Ext>,
+    alpha: Ext,
 }
 
-impl<F: Field> MultiRound<F> {
-    fn new(points: Vec<Point<F>>, rs: &Point<F>) -> Self {
+impl<F: Field, Ext: ExtensionField<F>> MultiRound<F, Ext> {
+    fn new(
+        points_base: Vec<Point<F>>,
+        points_ext: Vec<Point<Ext>>,
+        rs: Point<Ext>,
+        alpha: Ext,
+    ) -> Self {
         Self {
-            points,
-            rs: rs.clone(),
+            points_base,
+            points_ext,
+            rs,
+            alpha,
         }
     }
 
-    fn extend(&mut self, rs: &Point<F>) {
+    fn extend(&mut self, rs: &Point<Ext>) {
         self.rs.extend(rs.iter());
     }
 
-    fn eqs(&self, poly: &Poly<F>) -> Vec<F> {
-        self.points
+    fn eqs(&self, poly: &Poly<Ext>) -> Ext {
+        let rs = &self.rs.reversed();
+        let eqs = self
+            .points_base
             .iter()
             .map(|zs| {
                 let off = poly.k();
-                assert_eq!(off, zs.len() - self.rs.len());
+                assert_eq!(off, zs.len() - rs.len());
                 let (zs0, zs1) = zs.split_at(off);
-                eval_eq_xy(&zs1, &self.rs.reversed()) * poly.eval_lagrange(&zs0)
+                eval_eq_xy(&zs1, rs) * poly.eval_lagrange_ext(&zs0)
             })
-            .collect::<Vec<_>>()
+            .chain(self.points_ext.iter().map(|zs| {
+                let off = poly.k();
+                assert_eq!(off, zs.len() - rs.len());
+                let (zs0, zs1) = zs.split_at(off);
+                eval_eq_xy(&zs1, rs) * poly.eval_lagrange(&zs0)
+            }))
+            .collect::<Vec<_>>();
+        eqs.iter().horner(self.alpha) * self.alpha
     }
 }
 
@@ -284,16 +298,14 @@ where
 pub struct SumcheckVerifier<F: Field, Ext: ExtensionField<F>> {
     k: usize,
     sum: Ext,
-    ch: Ext,
-    multi_rounds: Vec<MultiRound<Ext>>,
+    multi_rounds: Vec<MultiRound<F, Ext>>,
     _marker: std::marker::PhantomData<F>,
 }
 
 impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
-    pub fn new(ch: Ext, k: usize) -> Self {
+    pub fn new(k: usize) -> Self {
         Self {
             k,
-            ch,
             sum: Ext::ZERO,
             multi_rounds: Vec::new(),
             _marker: std::marker::PhantomData,
@@ -308,36 +320,43 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
         &mut self,
         transcript: &mut Transcript,
         d: usize,
-        claims: &[Claim<Ext>],
+        alpha: Ext,
+        claims_base: &[Claim<F, Ext>],
+        claims_ext: &[Claim<Ext, Ext>],
     ) -> Result<Point<Ext>, crate::Error>
     where
         Transcript: Reader<Ext> + Challenge<F, Ext>,
     {
-        assert!(claims.iter().all(|o| { o.k() == self.k }));
-        self.sum = std::iter::once(self.sum)
-            .chain(claims.iter().map(|o| {
-                assert_eq!(o.k(), self.k);
-                o.eval
-            }))
-            .collect::<Vec<_>>()
-            .horner(self.ch);
+        assert!(claims_base.iter().all(|o| { o.k() == self.k }));
+        assert!(claims_ext.iter().all(|o| o.k() == self.k));
 
+        // update sum
+        self.sum = std::iter::once(&self.sum)
+            .chain(claims_base.iter().map(Claim::<F, Ext>::eval))
+            .chain(claims_ext.iter().map(Claim::<Ext, Ext>::eval))
+            .horner(alpha);
+
+        // run sumcheck rounds
         let round_rs: Point<Ext> = (0..d)
-            .map(|_| {
-                let r = reduce::<_, F, Ext>(transcript, &mut self.sum)?;
-
-                Ok(r)
-            })
+            .map(|_| reduce::<_, F, Ext>(transcript, &mut self.sum))
             .collect::<Result<Vec<_>, _>>()?
             .into();
 
+        // update previous multi rounds
         self.multi_rounds
             .iter_mut()
             .for_each(|round| round.extend(&round_rs));
 
-        let points = claims.iter().map(|o| &o.point).cloned().collect::<Vec<_>>();
+        // add current multi rounds
+        let points_base = claims_base.iter().map(Claim::point).collect::<Vec<_>>();
+        let points_ext = claims_ext.iter().map(Claim::point).collect::<Vec<_>>();
+        self.multi_rounds.push(MultiRound::new(
+            points_base,
+            points_ext,
+            round_rs.clone(),
+            alpha,
+        ));
 
-        self.multi_rounds.push(MultiRound::new(points, &round_rs));
         self.k -= d;
 
         Ok(round_rs)
@@ -358,23 +377,99 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
         Transcript: Reader<Ext>,
     {
         let poly: Poly<Ext> = self.read_poly(transcript)?;
-        let eqs: Vec<_> = self
+        let eqs = self
             .multi_rounds
             .iter()
-            .flat_map(|round| round.eqs(&poly))
-            .collect::<Vec<_>>();
-        (self.sum == eqs.horner(self.ch))
-            .then_some(())
-            .ok_or(crate::Error::Verify)
+            .map(|round| round.eqs(&poly))
+            .sum::<Ext>();
+        (self.sum == eqs).then_some(()).ok_or(crate::Error::Verify)
     }
 }
 
 #[cfg(test)]
 mod test {
 
+    pub(crate) fn make_claims_ext<
+        Transcript,
+        F: Field,
+        Ex0: ExtensionField<F>,
+        Ex1: ExtensionField<Ex0> + ExtensionField<F>,
+    >(
+        transcript: &mut Transcript,
+        n_points: usize,
+        poly: &Poly<Ex0>,
+    ) -> Result<Vec<Claim<Ex1, Ex1>>, crate::Error>
+    where
+        Transcript: Challenge<F, Ex1> + Writer<Ex1>,
+    {
+        (0..n_points)
+            .map(|_| {
+                let point = Point::expand(poly.k(), transcript.draw());
+                let eval = poly.eval_lagrange(&point);
+                let claim = Claim { point, eval };
+                transcript.write(claim.eval)?;
+                Ok(claim)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub(crate) fn make_claims_base<Transcript, F: Field, Ex0: ExtensionField<F>>(
+        transcript: &mut Transcript,
+        n_points: usize,
+        poly: &Poly<Ex0>,
+    ) -> Result<Vec<Claim<F, Ex0>>, crate::Error>
+    where
+        Transcript: Challenge<F, F> + Writer<Ex0>,
+    {
+        (0..n_points)
+            .map(|_| {
+                let point = Point::expand(poly.k(), transcript.draw());
+                let eval = poly.eval_lagrange_ext(&point);
+                let claim = Claim { point, eval };
+                transcript.write(claim.eval)?;
+                Ok(claim)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub(crate) fn get_claims_base<Transcript, F: Field, Ext: ExtensionField<F>>(
+        transcript: &mut Transcript,
+        k: usize,
+        n: usize,
+    ) -> Result<Vec<Claim<F, Ext>>, crate::Error>
+    where
+        Transcript: Reader<Ext> + Challenge<F, F>,
+    {
+        (0..n)
+            .map(|_| {
+                let var: F = transcript.draw();
+                let point = Point::expand(k, var);
+                let eval = transcript.read()?;
+                Ok(Claim::new(point, eval))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub(crate) fn get_claims_ext<Transcript, F: Field, Ext: ExtensionField<F>>(
+        transcript: &mut Transcript,
+        k: usize,
+        n: usize,
+    ) -> Result<Vec<Claim<Ext, Ext>>, crate::Error>
+    where
+        Transcript: Reader<Ext> + Challenge<F, Ext>,
+    {
+        (0..n)
+            .map(|_| {
+                let var: Ext = transcript.draw();
+                let point = Point::expand(k, var);
+                let eval = transcript.read()?;
+                Ok(Claim::new(point, eval))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+
     use crate::{
         pcs::{
-            get_claims, make_claims,
             sumcheck::{eval_eq_xy, MultiRound, SumcheckVerifier},
             Claim,
         },
@@ -383,7 +478,6 @@ mod test {
             rust_crypto::{RustCryptoReader, RustCryptoWriter},
             Challenge, Reader, Writer,
         },
-        utils::VecOps,
     };
     use p3_field::{extension::BinomialExtensionField, ExtensionField, Field};
     use rand::Rng;
@@ -407,7 +501,10 @@ mod test {
 
             let (proof, checkpoint_prover) = {
                 let mut transcript = Writer::init(domain);
-                let claims = make_claims::<_, F, F, Ext>(&mut transcript, n_points, &poly).unwrap();
+
+                let claims =
+                    make_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly).unwrap();
+
                 let alpha = Challenge::<F, Ext>::draw(&mut transcript);
                 let sc =
                     super::Sumcheck::<F, Ext>::new(&mut transcript, k, d, alpha, &claims, &poly)
@@ -415,19 +512,17 @@ mod test {
 
                 assert_eq!(sc.k(), k - d);
                 {
-                    let points = claims.iter().map(|o| &o.point).cloned().collect::<Vec<_>>();
-
-                    let round = MultiRound::new(points, sc.rs());
-                    let eqs = round.eqs(sc.poly());
-                    assert_eq!(eqs.horner(alpha), sc.sum());
+                    let points = claims.iter().map(Claim::point).collect::<Vec<_>>();
+                    let round = MultiRound::new(points, vec![], sc.rs().clone(), alpha);
+                    assert_eq!(round.eqs(sc.poly()), sc.sum());
                 }
 
                 {
                     let z = &claims[0].point;
                     let r = sc.rs().reversed();
                     assert_eq!(poly.eval_lagrange(&r), sc.poly.constant().unwrap());
-                    assert_eq!(sc.sum(), eval_eq_xy(z, &r) * poly.eval_lagrange(&r));
-                    assert_eq!(eval_eq_xy(z, &r), sc.eq.constant().unwrap());
+                    assert_eq!(sc.sum(), alpha * eval_eq_xy(z, &r) * poly.eval_lagrange(&r));
+                    assert_eq!(alpha * eval_eq_xy(z, &r), sc.eq.constant().unwrap());
                 }
 
                 sc.write_poly(&mut transcript).unwrap();
@@ -438,10 +533,12 @@ mod test {
 
             let checkpoint_verifier = {
                 let mut transcript = Reader::init(&proof, "");
-                let claims = get_claims::<_, F, Ext>(&mut transcript, k, n_points).unwrap();
+                let claims = get_claims_ext::<_, F, Ext>(&mut transcript, k, n_points).unwrap();
+                let mut verifier = SumcheckVerifier::<F, Ext>::new(k);
                 let alpha = Challenge::<F, Ext>::draw(&mut transcript);
-                let mut verifier = SumcheckVerifier::<F, Ext>::new(alpha, k);
-                verifier.fold(&mut transcript, d, &claims).unwrap();
+                verifier
+                    .fold(&mut transcript, d, alpha, &[], &claims)
+                    .unwrap();
                 verifier.finalize(&mut transcript).unwrap();
                 transcript.draw()
             };
@@ -452,31 +549,38 @@ mod test {
             let mut rng = crate::test::rng(1);
             for n_fold in 1..4 {
                 for _ in 0..100 {
-                    let n_points = (0..n_fold)
+                    let n_ext_points = (0..n_fold)
                         .map(|_| rng.random_range(1..4))
                         .collect::<Vec<usize>>();
+
+                    let n_base_points = (0..n_fold)
+                        .map(|i| if i == 0 { 0 } else { rng.random_range(1..4) })
+                        .collect::<Vec<usize>>();
+
                     let ds = (0..n_fold)
                         .map(|_| rng.random_range(1..4))
                         .collect::<Vec<usize>>();
+
                     let k = ds.iter().sum::<usize>();
 
                     let poly: Poly<F> = Poly::rand(&mut rng, k);
                     let (proof, checkpoint_prover) = {
                         let mut transcript = Writer::init("");
-                        let alpha = Challenge::<F, Ext>::draw(&mut transcript);
 
                         let mut k_folding = k;
                         let mut round = 0;
 
                         let (mut sc, mut rounds) = {
-                            let n = n_points[0];
+                            let n_ext_points = n_ext_points[0];
                             let d = ds[0];
 
-                            let claims = make_claims(&mut transcript, n, &poly).unwrap();
+                            let claims =
+                                make_claims_ext(&mut transcript, n_ext_points, &poly).unwrap();
 
                             k_folding -= d;
                             round += d;
 
+                            let alpha = Challenge::<F, Ext>::draw(&mut transcript);
                             let sc =
                                 super::Sumcheck::new(&mut transcript, k, d, alpha, &claims, &poly)
                                     .unwrap();
@@ -484,50 +588,64 @@ mod test {
                             assert_eq!(sc.k(), k_folding);
                             assert_eq!(sc.round(), round);
 
-                            let points =
-                                claims.iter().map(|o| &o.point).cloned().collect::<Vec<_>>();
-                            let round = MultiRound::new(points, sc.rs());
+                            let points = claims.iter().map(Claim::point).collect::<Vec<_>>();
+                            let round =
+                                MultiRound::<F, Ext>::new(vec![], points, sc.rs().clone(), alpha);
 
-                            assert_eq!(round.eqs(sc.poly()).horner(alpha), sc.sum());
+                            assert_eq!(round.eqs(sc.poly()), sc.sum());
                             (sc, vec![round])
                         };
 
-                        n_points
+                        n_ext_points
                             .iter()
+                            .zip(n_base_points.iter())
                             .zip(ds.iter())
                             .skip(1)
-                            .for_each(|(&num_points, &d)| {
+                            .for_each(|((&n_ext_points, &n_base_points), &d)| {
                                 k_folding -= d;
                                 round += d;
 
-                                let claims = make_claims::<_, F, Ext, Ext>(
+                                let claims_base = make_claims_base::<_, F, Ext>(
                                     &mut transcript,
-                                    num_points,
+                                    n_base_points,
                                     &sc.poly,
                                 )
                                 .unwrap();
 
-                                let rs = sc.fold(&mut transcript, d, &claims).unwrap();
+                                let claims_ext = make_claims_ext::<_, F, Ext, Ext>(
+                                    &mut transcript,
+                                    n_ext_points,
+                                    &sc.poly,
+                                )
+                                .unwrap();
+
+                                let alpha = Challenge::<F, Ext>::draw(&mut transcript);
+                                let rs = sc
+                                    .fold(&mut transcript, d, alpha, &claims_base, &claims_ext)
+                                    .unwrap();
 
                                 assert_eq!(sc.k(), k_folding);
                                 assert_eq!(sc.round(), round);
 
                                 {
                                     rounds.iter_mut().for_each(|round| round.extend(&rs));
-                                    let points = claims
-                                        .iter()
-                                        .map(|o| &o.point)
-                                        .cloned()
-                                        .collect::<Vec<_>>();
-                                    rounds.push(MultiRound::new(points, &rs));
+
+                                    let points_base =
+                                        claims_base.iter().map(Claim::point).collect::<Vec<_>>();
+                                    let points_ext =
+                                        claims_ext.iter().map(Claim::point).collect::<Vec<_>>();
+                                    rounds.push(MultiRound::<F, Ext>::new(
+                                        points_base,
+                                        points_ext,
+                                        rs,
+                                        alpha,
+                                    ));
                                 }
 
-                                let eqs: Vec<_> = rounds
-                                    .iter()
-                                    .flat_map(|round| round.eqs(sc.poly()))
-                                    .collect::<Vec<_>>();
-
-                                assert_eq!(eqs.horner(alpha), sc.sum());
+                                assert_eq!(
+                                    rounds.iter().map(|round| round.eqs(sc.poly())).sum::<Ext>(),
+                                    sc.sum()
+                                );
                             });
 
                         assert_eq!(round, k);
@@ -541,16 +659,32 @@ mod test {
 
                     let checkpoint_verifier = {
                         let mut transcript = Reader::init(&proof, "");
-                        let alpha = Challenge::<F, Ext>::draw(&mut transcript);
+                        let mut verifier = SumcheckVerifier::<F, Ext>::new(k);
 
-                        let mut verifier = SumcheckVerifier::<F, Ext>::new(alpha, k);
+                        n_ext_points
+                            .iter()
+                            .zip(n_base_points.iter())
+                            .zip(ds.iter())
+                            .for_each(|((&n_ext_points, &n_base_points), &d)| {
+                                let claims_base: Vec<Claim<F, Ext>> = get_claims_base::<_, F, Ext>(
+                                    &mut transcript,
+                                    verifier.k,
+                                    n_base_points,
+                                )
+                                .unwrap();
 
-                        n_points.iter().zip(ds.iter()).for_each(|(&n, &d)| {
-                            let claims: Vec<Claim<Ext>> =
-                                get_claims::<_, F, Ext>(&mut transcript, verifier.k, n).unwrap();
+                                let claims_ext: Vec<Claim<Ext, Ext>> = get_claims_ext::<_, F, Ext>(
+                                    &mut transcript,
+                                    verifier.k,
+                                    n_ext_points,
+                                )
+                                .unwrap();
 
-                            verifier.fold(&mut transcript, d, &claims).unwrap();
-                        });
+                                let alpha = Challenge::<F, Ext>::draw(&mut transcript);
+                                verifier
+                                    .fold(&mut transcript, d, alpha, &claims_base, &claims_ext)
+                                    .unwrap();
+                            });
 
                         verifier.finalize(&mut transcript).unwrap();
                         let checkpoint: F = transcript.draw();
