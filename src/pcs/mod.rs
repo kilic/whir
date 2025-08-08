@@ -36,10 +36,98 @@ impl<F: Field, Ext: ExtensionField<F>> Claim<F, Ext> {
 
 #[cfg(test)]
 mod test {
-    use crate::poly::{Point, Poly};
+    use crate::{
+        merkle::{MerkleTree, RustCrypto},
+        pcs::{whir::Whir, Claim},
+        poly::{Point, Poly},
+        transcript::{
+            rust_crypto::{RustCryptoReader, RustCryptoWriter},
+            Challenge, Reader, Writer,
+        },
+    };
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
+    use p3_field::{extension::BinomialExtensionField, ExtensionField, Field};
     use p3_matrix::{dense::RowMajorMatrix, Matrix};
     use rand::Rng;
+
+    pub(crate) fn make_claims_ext<
+        Transcript,
+        F: Field,
+        Ex0: ExtensionField<F>,
+        Ex1: ExtensionField<Ex0> + ExtensionField<F>,
+    >(
+        transcript: &mut Transcript,
+        n_points: usize,
+        poly: &Poly<Ex0>,
+    ) -> Result<Vec<Claim<Ex1, Ex1>>, crate::Error>
+    where
+        Transcript: Challenge<F, Ex1> + Writer<Ex1>,
+    {
+        (0..n_points)
+            .map(|_| {
+                let point = Point::expand(poly.k(), transcript.draw());
+                let eval = poly.eval_lagrange(&point);
+                let claim = Claim { point, eval };
+                transcript.write(claim.eval)?;
+                Ok(claim)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub(crate) fn make_claims_base<Transcript, F: Field, Ex0: ExtensionField<F>>(
+        transcript: &mut Transcript,
+        n_points: usize,
+        poly: &Poly<Ex0>,
+    ) -> Result<Vec<Claim<F, Ex0>>, crate::Error>
+    where
+        Transcript: Challenge<F, F> + Writer<Ex0>,
+    {
+        (0..n_points)
+            .map(|_| {
+                let point = Point::expand(poly.k(), transcript.draw());
+                let eval = poly.eval_lagrange_ext(&point);
+                let claim = Claim { point, eval };
+                transcript.write(claim.eval)?;
+                Ok(claim)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub(crate) fn get_claims_base<Transcript, F: Field, Ext: ExtensionField<F>>(
+        transcript: &mut Transcript,
+        k: usize,
+        n: usize,
+    ) -> Result<Vec<Claim<F, Ext>>, crate::Error>
+    where
+        Transcript: Reader<Ext> + Challenge<F, F>,
+    {
+        (0..n)
+            .map(|_| {
+                let var: F = transcript.draw();
+                let point = Point::expand(k, var);
+                let eval = transcript.read()?;
+                Ok(Claim::new(point, eval))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub(crate) fn get_claims_ext<Transcript, F: Field, Ext: ExtensionField<F>>(
+        transcript: &mut Transcript,
+        k: usize,
+        n: usize,
+    ) -> Result<Vec<Claim<Ext, Ext>>, crate::Error>
+    where
+        Transcript: Reader<Ext> + Challenge<F, Ext>,
+    {
+        (0..n)
+            .map(|_| {
+                let var: Ext = transcript.draw();
+                let point = Point::expand(k, var);
+                let eval = transcript.read()?;
+                Ok(Claim::new(point, eval))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
 
     #[test]
     fn test_whir_final_folding() {
@@ -105,4 +193,67 @@ mod test {
             }
         }
     }
+
+    #[test]
+    fn test_whir_opening() {
+        type F = p3_goldilocks::Goldilocks;
+        type Ext = BinomialExtensionField<F, 2>;
+
+        type Writer = RustCryptoWriter<Vec<u8>, sha3::Keccak256>;
+        type Reader<'a> = RustCryptoReader<&'a [u8], sha3::Keccak256>;
+
+        type Hasher = RustCrypto<sha3::Keccak256>;
+        type Compress = RustCrypto<sha3::Keccak256>;
+
+        let hasher = Hasher::default();
+        let compress = Compress::default();
+
+        let comm = MerkleTree::<F, [u8; 32], _, _>::new(hasher.clone(), compress.clone());
+        let comm_ext = MerkleTree::<Ext, [u8; 32], _, _>::new(hasher, compress);
+
+        let k = 16;
+        let folding = 2;
+        let rate = 1;
+        let soundness = crate::pcs::params::SecurityAssumption::CapacityBound;
+        let security_level = 32;
+        let n_points = 1;
+        let whir = Whir::new(k, folding, rate, soundness, security_level, comm, comm_ext);
+
+        let mut rng = &mut crate::test::rng(1);
+        let proof = {
+            let poly_in_coeffs: Poly<F> = Poly::rand(&mut rng, k);
+            let poly_in_lagrange: Poly<F> = poly_in_coeffs.clone().to_lagrange();
+
+            let mut transcript = Writer::init("test");
+            let data = whir
+                .commit::<_, Radix2DitParallel<F>>(&mut transcript, &poly_in_coeffs)
+                .unwrap();
+
+            let claims =
+                make_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly_in_lagrange)
+                    .unwrap();
+            whir.open::<_, Radix2DitParallel<Ext>>(&mut transcript, claims, data, &poly_in_coeffs)
+                .unwrap();
+
+            transcript.finalize()
+        };
+    }
 }
+
+
+// n_ood: 16 1 1
+// n_ood: 14 2 1
+// n_ood: 12 3 1
+// n_ood: 10 4 1
+// n_ood: 8 5 1
+
+// commit k 17
+// commit k 16
+// stir 35 15
+// commit k 15
+// stir 17 14
+// commit k 14
+// stir 11 13
+// commit k 13
+// stir 9 12
+// stir 7 11

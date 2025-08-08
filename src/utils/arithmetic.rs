@@ -112,6 +112,7 @@ pub fn par_horner<F: Field, E: ExtensionField<F>>(poly: &[F], point: E) -> E {
 
 pub trait VecOps<F: Field> {
     fn horner<E: ExtensionField<F>>(self, x: E) -> E;
+    fn horner_shifted<E: ExtensionField<F>>(self, x: E, shift: E) -> E;
 }
 
 impl<I, F> VecOps<F> for I
@@ -122,5 +123,9 @@ where
 {
     fn horner<E: ExtensionField<F>>(self, x: E) -> E {
         self.rfold(E::ZERO, |acc, coeff| acc * x + *coeff)
+    }
+
+    fn horner_shifted<E: ExtensionField<F>>(self, x: E, shift: E) -> E {
+        self.rfold(E::ZERO, |acc, coeff| acc * x + *coeff) * shift
     }
 }
