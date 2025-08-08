@@ -237,23 +237,12 @@ mod test {
 
             transcript.finalize()
         };
+
+        {
+            let mut transcript = Reader::init(&proof, "test");
+            let comm: [u8; 32] = transcript.read().unwrap();
+            let claims = get_claims_ext::<_, F, Ext>(&mut transcript, whir.k, n_points).unwrap();
+            whir.verify(&mut transcript, claims, comm).unwrap();
+        }
     }
 }
-
-
-// n_ood: 16 1 1
-// n_ood: 14 2 1
-// n_ood: 12 3 1
-// n_ood: 10 4 1
-// n_ood: 8 5 1
-
-// commit k 17
-// commit k 16
-// stir 35 15
-// commit k 15
-// stir 17 14
-// commit k 14
-// stir 11 13
-// commit k 13
-// stir 9 12
-// stir 7 11

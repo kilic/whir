@@ -11,28 +11,28 @@ use rayon::{
 };
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
-pub struct Point<F>(pub Vec<F>);
+pub struct Point<F: Field>(pub Vec<F>);
 
-impl<F> std::ops::Deref for Point<F> {
+impl<F: Field> std::ops::Deref for Point<F> {
     type Target = Vec<F>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<F> std::ops::DerefMut for Point<F> {
+impl<F: Field> std::ops::DerefMut for Point<F> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl<F> From<Vec<F>> for Point<F> {
+impl<F: Field> From<Vec<F>> for Point<F> {
     fn from(v: Vec<F>) -> Self {
         Self(v)
     }
 }
 
-impl<'a, F> From<&'a [F]> for Point<F>
+impl<'a, F: Field> From<&'a [F]> for Point<F>
 where
     F: Clone,
 {
@@ -41,7 +41,7 @@ where
     }
 }
 
-impl<F: Clone> Point<F> {
+impl<F: Field> Point<F> {
     pub fn new(zs: &[F]) -> Self {
         zs.into()
     }
@@ -57,9 +57,7 @@ impl<F: Clone> Point<F> {
         let (left, right) = self.0.split_at(mid);
         (left.into(), right.into())
     }
-}
 
-impl<F: Field> Point<F> {
     pub fn expand(k: usize, mut var: F) -> Self {
         (0..k)
             .map(|_| {

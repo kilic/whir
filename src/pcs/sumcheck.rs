@@ -363,21 +363,15 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
         Ok(round_rs)
     }
 
-    pub fn read_poly<Transcript>(
-        &self,
+    pub fn finalize<Transcript>(
+        self,
         transcript: &mut Transcript,
-    ) -> Result<Poly<Ext>, crate::Error>
+        poly: Option<Poly<Ext>>,
+    ) -> Result<(), crate::Error>
     where
         Transcript: Reader<Ext>,
     {
-        Ok(transcript.read_many(1 << self.k)?.into())
-    }
-
-    pub fn finalize<Transcript>(self, transcript: &mut Transcript) -> Result<(), crate::Error>
-    where
-        Transcript: Reader<Ext>,
-    {
-        let poly: Poly<Ext> = self.read_poly(transcript)?;
+        let poly = poly.map_or_else(|| Ok(Poly::new(transcript.read_many(1 << self.k)?)), Ok)?;
         let eqs = self
             .multi_rounds
             .iter()
@@ -462,7 +456,7 @@ mod test {
                 verifier
                     .fold(&mut transcript, d, alpha, &[], &claims)
                     .unwrap();
-                verifier.finalize(&mut transcript).unwrap();
+                verifier.finalize(&mut transcript, None).unwrap();
                 transcript.draw()
             };
             assert_eq!(checkpoint_prover, checkpoint_verifier);
@@ -609,7 +603,7 @@ mod test {
                                     .unwrap();
                             });
 
-                        verifier.finalize(&mut transcript).unwrap();
+                        verifier.finalize(&mut transcript, None).unwrap();
                         let checkpoint: F = transcript.draw();
                         checkpoint
                     };
