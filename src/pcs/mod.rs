@@ -2,7 +2,6 @@ use crate::poly::{Point, Poly};
 use p3_field::{ExtensionField, Field};
 
 pub mod params;
-pub mod stir;
 pub mod sumcheck;
 pub mod whir;
 
@@ -37,8 +36,9 @@ impl<F: Field, Ext: ExtensionField<F>> Claim<F, Ext> {
 #[cfg(test)]
 mod test {
     use crate::{
+        field::SerializedField,
         merkle::{MerkleTree, RustCrypto},
-        pcs::{whir::Whir, Claim},
+        pcs::{params::SecurityAssumption, whir::Whir, Claim},
         poly::{Point, Poly},
         transcript::{
             rust_crypto::{RustCryptoReader, RustCryptoWriter},
@@ -46,9 +46,12 @@ mod test {
         },
     };
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
-    use p3_field::{extension::BinomialExtensionField, ExtensionField, Field};
+    use p3_field::{extension::BinomialExtensionField, ExtensionField, Field, TwoAdicField};
     use p3_matrix::{dense::RowMajorMatrix, Matrix};
-    use rand::Rng;
+    use rand::{
+        distr::{Distribution, StandardUniform},
+        Rng,
+    };
 
     pub(crate) fn make_claims_ext<
         Transcript,
@@ -130,7 +133,7 @@ mod test {
     }
 
     #[test]
-    fn test_whir_final_folding() {
+    fn test_final_folding() {
         type F = p3_goldilocks::Goldilocks;
         use p3_field::PrimeCharacteristicRing;
         use p3_field::TwoAdicField;
@@ -194,11 +197,19 @@ mod test {
         }
     }
 
-    #[test]
-    fn test_whir_opening() {
-        type F = p3_goldilocks::Goldilocks;
-        type Ext = BinomialExtensionField<F, 2>;
-
+    fn run_whir<
+        F: TwoAdicField + Ord + SerializedField,
+        Ext: ExtensionField<F> + TwoAdicField + Ord + SerializedField,
+    >(
+        k: usize,
+        folding: usize,
+        rate: usize,
+        soundness: SecurityAssumption,
+        security_level: usize,
+        n_points: usize,
+    ) where
+        StandardUniform: Distribution<F>,
+    {
         type Writer = RustCryptoWriter<Vec<u8>, sha3::Keccak256>;
         type Reader<'a> = RustCryptoReader<&'a [u8], sha3::Keccak256>;
 
@@ -211,16 +222,10 @@ mod test {
         let comm = MerkleTree::<F, [u8; 32], _, _>::new(hasher.clone(), compress.clone());
         let comm_ext = MerkleTree::<Ext, [u8; 32], _, _>::new(hasher, compress);
 
-        let k = 16;
-        let folding = 2;
-        let rate = 1;
-        let soundness = crate::pcs::params::SecurityAssumption::CapacityBound;
-        let security_level = 32;
-        let n_points = 1;
         let whir = Whir::new(k, folding, rate, soundness, security_level, comm, comm_ext);
 
         let mut rng = &mut crate::test::rng(1);
-        let proof = {
+        let (proof, checkpoint_prover) = {
             let poly_in_coeffs: Poly<F> = Poly::rand(&mut rng, k);
             let poly_in_lagrange: Poly<F> = poly_in_coeffs.clone().to_lagrange();
 
@@ -235,14 +240,41 @@ mod test {
             whir.open::<_, Radix2DitParallel<Ext>>(&mut transcript, claims, data, &poly_in_coeffs)
                 .unwrap();
 
-            transcript.finalize()
+            let checkpoint: F = transcript.draw();
+            (transcript.finalize(), checkpoint)
         };
 
-        {
+        let checkpoint_verifier = {
             let mut transcript = Reader::init(&proof, "test");
             let comm: [u8; 32] = transcript.read().unwrap();
             let claims = get_claims_ext::<_, F, Ext>(&mut transcript, whir.k, n_points).unwrap();
             whir.verify(&mut transcript, claims, comm).unwrap();
+            let checkpoint: F = transcript.draw();
+            checkpoint
+        };
+
+        assert_eq!(checkpoint_prover, checkpoint_verifier);
+    }
+
+    #[test]
+    fn test_whir() {
+        type F = p3_goldilocks::Goldilocks;
+        type Ext = BinomialExtensionField<F, 2>;
+
+        let soundness_type = [
+            SecurityAssumption::JohnsonBound,
+            SecurityAssumption::CapacityBound,
+            SecurityAssumption::UniqueDecoding,
+        ];
+
+        for soundness in soundness_type {
+            for k in 4..=10 {
+                for folding in 1..=3 {
+                    for n_points in 1..=4 {
+                        run_whir::<F, Ext>(k, folding, 1, soundness, 32, n_points);
+                    }
+                }
+            }
         }
     }
 }

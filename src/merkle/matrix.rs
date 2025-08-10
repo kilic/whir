@@ -118,7 +118,7 @@ where
         transcript.write_hint_many(&leaf)?;
 
         let mid = 1 << (k - 1);
-        let sibling = comm
+        let _sibling = comm
             .data
             .row(index ^ mid)
             .unwrap()
@@ -136,7 +136,7 @@ where
                 let node = layer[index_asc ^ 1];
                 #[cfg(debug_assertions)]
                 if _i == 0 {
-                    assert_eq!(self.h.hash_iter(&sibling), node);
+                    assert_eq!(self.h.hash_iter(&_sibling), node);
                 }
                 witness.push(node);
                 index_asc >>= 1;

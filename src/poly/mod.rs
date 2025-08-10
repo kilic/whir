@@ -130,7 +130,7 @@ impl<F: Field> Point<F> {
     pub fn eval_lagrange_ext<Ext: ExtensionField<F>>(&self, poly: &[Ext]) -> Ext {
         let constant = (poly.len() == 1).then_some(*poly.first().unwrap());
         if let Some(constant) = constant {
-            return constant.into();
+            return constant;
         }
 
         let k = poly.k();
@@ -426,16 +426,17 @@ mod test {
         let cw = &cw.values;
 
         let omega = F::two_adic_generator(rate);
-        for i in 0..size {
+
+        cw.iter().enumerate().for_each(|(i, &cw_i)| {
             let wi = omega.exp_u64(i as u64);
             let ei = poly.eval_univariate(wi);
-            assert_eq!(ei, cw[i]);
+            assert_eq!(ei, cw_i);
 
             let point = Point::<F>::expand(poly.k(), wi);
             let u0 = poly.eval_lagrange(&point);
             let u1 = poly_in_coeffs.eval_univariate::<F>(wi);
             assert_eq!(u0, u1);
-        }
+        });
     }
 
     #[test]

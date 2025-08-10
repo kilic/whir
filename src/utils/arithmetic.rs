@@ -94,7 +94,7 @@ pub fn par_horner<F: Field, E: ExtensionField<F>>(poly: &[F], point: E) -> E {
         poly.iter()
             .rfold(E::ZERO, |acc, &coeff| acc * point + coeff)
     } else {
-        let chunk_size = (n + num_threads - 1) / num_threads;
+        let chunk_size = n.div_ceil(num_threads);
         let mut parts = vec![E::ZERO; num_threads];
         rayon::scope(|scope| {
             for (chunk_idx, (out, poly)) in

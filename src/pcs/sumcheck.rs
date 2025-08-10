@@ -290,9 +290,9 @@ where
 {
     let v0: Ext = transcript.read()?;
     let v2 = transcript.read()?;
-    let v = vec![v0, *sum - v0, v2];
+    let sumcheck_poly = vec![v0, *sum - v0, v2];
     let r = Challenge::<F, Ext>::draw(transcript);
-    *sum = extrapolate(&v, r);
+    *sum = extrapolate(&sumcheck_poly, r);
     Ok(r)
 }
 
