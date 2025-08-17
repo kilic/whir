@@ -88,7 +88,7 @@ mod test {
         (0..n_points)
             .map(|_| {
                 let point = Point::expand(poly.k(), transcript.draw());
-                let eval = poly.eval_lagrange_ext(&point);
+                let eval = poly.eval_lagrange(&point.as_ext::<Ex0>());
                 let claim = Claim { point, eval };
                 transcript.write(claim.eval)?;
                 Ok(claim)

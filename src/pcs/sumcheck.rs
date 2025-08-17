@@ -268,7 +268,7 @@ impl<F: Field, Ext: ExtensionField<F>> MultiRound<F, Ext> {
                 let off = poly.k();
                 assert_eq!(off, zs.len() - rs.len());
                 let (zs0, zs1) = zs.split_at(off);
-                eval_eq_xy(&zs1, rs) * poly.eval_lagrange_ext(&zs0)
+                eval_eq_xy(&zs1, rs) * poly.eval_lagrange(&zs0.as_ext::<Ext>())
             })
             .chain(self.points_ext.iter().map(|zs| {
                 let off = poly.k();
