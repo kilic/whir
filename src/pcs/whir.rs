@@ -167,7 +167,6 @@ impl<
         // `self.folding` number of rounds is run
         let mut sumcheck = Sumcheck::new(
             transcript,
-            self.k,
             self.folding,
             alpha,
             &claims,

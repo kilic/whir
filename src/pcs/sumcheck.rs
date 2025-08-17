@@ -94,7 +94,6 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
 
     pub fn new<Transcript>(
         transcript: &mut Transcript,
-        k: usize,
         d: usize,
         alpha: Ext,
 
@@ -105,9 +104,9 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         F: ExtensionField<F>,
         Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
     {
-        assert_eq!(poly.k(), k);
-        assert!(claims_ext.iter().all(|o| o.k() == k));
-        assert!(d > 0);
+        let k = poly.k();
+        assert!(claims_ext.iter().all(|o| o.k() == poly.k()));
+        assert!(k >= d);
 
         let mut sum = claims_ext
             .iter()
@@ -400,9 +399,8 @@ mod test {
                     make_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly).unwrap();
 
                 let alpha = Challenge::<F, Ext>::draw(&mut transcript);
-                let sc =
-                    super::Sumcheck::<F, Ext>::new(&mut transcript, k, d, alpha, &claims, &poly)
-                        .unwrap();
+                let sc = super::Sumcheck::<F, Ext>::new(&mut transcript, d, alpha, &claims, &poly)
+                    .unwrap();
 
                 assert_eq!(sc.k(), k - d);
                 {
@@ -476,7 +474,7 @@ mod test {
 
                             let alpha = Challenge::<F, Ext>::draw(&mut transcript);
                             let sc =
-                                super::Sumcheck::new(&mut transcript, k, d, alpha, &claims, &poly)
+                                super::Sumcheck::new(&mut transcript, d, alpha, &claims, &poly)
                                     .unwrap();
 
                             assert_eq!(sc.k(), k_folding);
