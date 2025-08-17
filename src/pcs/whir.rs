@@ -259,7 +259,7 @@ impl<
                         let point = Point::expand(poly.k(), point);
 
                         #[cfg(debug_assertions)]
-                        assert_eq!(eval, sumcheck.poly().eval_lagrange_ext(&point));
+                        assert_eq!(eval, sumcheck.poly().eval_lagrange(&point.as_ext::<Ext>()));
 
                         Claim::new(point, eval)
                     })
@@ -284,7 +284,7 @@ impl<
                         let point = Point::expand(poly.k(), point);
 
                         #[cfg(debug_assertions)]
-                        assert_eq!(eval, sumcheck.poly().eval_lagrange_ext(&point));
+                        assert_eq!(eval, sumcheck.poly().eval_lagrange(&point.as_ext::<Ext>()));
 
                         Claim::new(point, eval)
                     })

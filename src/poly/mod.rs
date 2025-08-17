@@ -127,36 +127,6 @@ impl<F: Field> Point<F> {
         poly[0]
     }
 
-    pub fn eval_lagrange_ext<Ext: ExtensionField<F>>(&self, poly: &[Ext]) -> Ext {
-        let constant = (poly.len() == 1).then_some(*poly.first().unwrap());
-        if let Some(constant) = constant {
-            return constant;
-        }
-
-        let k = poly.k();
-        assert_eq!(k, self.len());
-
-        let mid = 1 << (k - 1);
-        let (lo, hi) = poly.split_at(mid);
-        let mut poly: Vec<Ext> = unsafe_allocate_zero_vec(mid);
-        let z0 = *self.last().unwrap();
-        lo.par_iter()
-            .zip_eq(hi.par_iter())
-            .zip_eq(poly.par_iter_mut())
-            .for_each(|((&a0, &a1), t)| *t = (a1 - a0) * z0 + a0);
-
-        for &zi in self.iter().rev().skip(1) {
-            let mid = poly.len() / 2;
-            let (lo, hi) = poly.split_at_mut(mid);
-            lo.par_iter_mut()
-                .zip(hi.par_iter())
-                .for_each(|(a0, a1)| *a0 += (*a1 - *a0) * zi);
-            poly.truncate(mid);
-        }
-        assert_eq!(poly.k(), 0);
-        poly[0]
-    }
-
     pub fn eval_coeffs<BaseField: Field>(&self, poly: &[BaseField]) -> F
     where
         F: ExtensionField<BaseField>,
@@ -275,15 +245,7 @@ impl<F: Field> Poly<F> {
         point.eval_lagrange(self)
     }
 
-    pub fn eval_lagrange_ext<BaseField: Field>(&self, point: &Point<BaseField>) -> F
-    where
-        F: ExtensionField<BaseField>,
-    {
-        point.eval_lagrange_ext(self)
-    }
-
     pub fn eval_univariate<Ext: ExtensionField<F>>(&self, point: Ext) -> Ext {
-        // self.values.iter().horner(point)
         crate::utils::par_horner(&self.values, point)
     }
 

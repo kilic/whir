@@ -25,14 +25,19 @@ fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &[F], y: &[Ext]) -> Ext {
         .product()
 }
 
-fn round_inner_ext<Transcript, F: Field, Ext: ExtensionField<F>>(
+fn round<
+    Transcript,
+    F: Field,
+    Ex0: ExtensionField<F>,
+    Ex1: ExtensionField<Ex0> + ExtensionField<F>,
+>(
     transcript: &mut Transcript,
-    sum: &mut Ext,
-    poly: &Poly<F>,
-    eq: &mut Poly<Ext>,
-) -> Result<(Poly<Ext>, Ext), crate::Error>
+    sum: &mut Ex1,
+    poly: &Poly<Ex0>,
+    eq: &mut Poly<Ex1>,
+) -> Result<Ex1, crate::Error>
 where
-    Transcript: Writer<Ext> + Challenge<F, Ext>,
+    Transcript: Writer<Ex1> + Challenge<F, Ex1>,
 {
     let mid = poly.len() / 2;
     let (plo, phi) = poly.split_at(mid);
@@ -44,51 +49,16 @@ where
         .zip(elo.par_iter().zip(ehi.par_iter()))
         .map(|((&p0, &p1), (&e0, &e1))| (e0 * p0, (e1.double() - e0) * (p1.double() - p0)))
         .reduce(
-            || (Ext::ZERO, Ext::ZERO),
+            || (Ex1::ZERO, Ex1::ZERO),
             |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
         );
 
     transcript.write(v0)?;
     transcript.write(v2)?;
     let round_poly = vec![v0, *sum - v0, v2];
-    let r = Challenge::<F, Ext>::draw(transcript);
+    let r = Challenge::<F, Ex1>::draw(transcript);
     *sum = extrapolate(&round_poly, r);
     eq.fix_var(r);
-    let poly = poly.fix_var_ext(r);
-    Ok((poly, r))
-}
-
-fn round_inner<Transcript, F: Field, Ext: ExtensionField<F>>(
-    transcript: &mut Transcript,
-    sum: &mut Ext,
-    poly: &mut Poly<Ext>,
-    eq: &mut Poly<Ext>,
-) -> Result<Ext, crate::Error>
-where
-    Transcript: Writer<Ext> + Challenge<F, Ext>,
-{
-    let mid = poly.len() / 2;
-    let (plo, phi) = poly.split_at(mid);
-    let (elo, ehi) = eq.split_at(mid);
-
-    let (v0, v2) = plo
-        .par_iter()
-        .zip(phi.par_iter())
-        .zip(elo.par_iter().zip(ehi.par_iter()))
-        .map(|((&p0, &p1), (&e0, &e1))| (e0 * p0, (e1.double() - e0) * (p1.double() - p0)))
-        .reduce(
-            || (Ext::ZERO, Ext::ZERO),
-            |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
-        );
-
-    transcript.write(v0)?;
-    transcript.write(v2)?;
-    let round_poly = vec![v0, *sum - v0, v2];
-    let r = Challenge::<F, Ext>::draw(transcript);
-    *sum = extrapolate(&round_poly, r);
-    eq.fix_var(r);
-    poly.fix_var(r);
-
     Ok(r)
 }
 
@@ -152,7 +122,8 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
             .into();
 
         // first round
-        let (mut poly, r) = round_inner_ext(transcript, &mut sum, poly, &mut eq)?;
+        let r = round(transcript, &mut sum, poly, &mut eq)?;
+        let mut poly = poly.fix_var_ext(r);
         let mut rs: Point<Ext> = vec![r].into();
 
         #[cfg(debug_assertions)]
@@ -165,7 +136,8 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
 
         // rest
         (1..d).try_for_each(|_| {
-            let r = round_inner(transcript, &mut sum, &mut poly, &mut eq)?;
+            let r = round::<_, F, Ext, Ext>(transcript, &mut sum, &poly, &mut eq)?;
+            poly.fix_var(r);
             rs.push(r);
 
             #[cfg(debug_assertions)]
@@ -223,7 +195,12 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         });
 
         let rs = (0..d)
-            .map(|_| round_inner(transcript, &mut self.sum, &mut self.poly, &mut self.eq))
+            .map(|_| {
+                let r =
+                    round::<_, F, Ext, Ext>(transcript, &mut self.sum, &self.poly, &mut self.eq)?;
+                self.poly.fix_var(r);
+                Ok(r)
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         self.rs.extend(rs.iter());
@@ -268,7 +245,7 @@ impl<F: Field, Ext: ExtensionField<F>> MultiRound<F, Ext> {
                 let off = poly.k();
                 assert_eq!(off, zs.len() - rs.len());
                 let (zs0, zs1) = zs.split_at(off);
-                eval_eq_xy(&zs1, rs) * poly.eval_lagrange_ext(&zs0)
+                eval_eq_xy(&zs1, rs) * poly.eval_lagrange(&zs0.as_ext::<Ext>())
             })
             .chain(self.points_ext.iter().map(|zs| {
                 let off = poly.k();
