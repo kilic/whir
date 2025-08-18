@@ -63,7 +63,6 @@ where
 }
 
 pub struct Sumcheck<F: Field, Ext: ExtensionField<F>> {
-    k: usize,
     sum: Ext,
     rs: Point<Ext>,
     eq: Poly<Ext>,
@@ -74,10 +73,6 @@ pub struct Sumcheck<F: Field, Ext: ExtensionField<F>> {
 impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
     pub fn k(&self) -> usize {
         self.poly.k()
-    }
-
-    pub fn round(&self) -> usize {
-        self.k - self.poly.k()
     }
 
     pub fn poly(&self) -> &Poly<Ext> {
@@ -104,15 +99,17 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         F: ExtensionField<F>,
         Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
     {
-        let k = poly.k();
+        // let k = poly.k();
         claims.iter().for_each(|o| assert_eq!(o.k(), poly.k()));
-        assert!(k >= d);
+        // assert!(k >= d);
 
+        // calculate compressed sum of initial claims
         let mut sum = claims
             .iter()
             .map(Claim::<Ext, Ext>::eval)
             .horner_shifted(alpha, alpha);
 
+        // calculate compressed eqs of initial claims
         let points = claims.iter().map(Claim::point).collect::<Vec<_>>();
         let mut eq = compressed_eq(&points, alpha, alpha);
 
@@ -150,7 +147,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         })?;
 
         Ok(Self {
-            k,
+            // k,
             sum,
             rs,
             eq,
@@ -478,7 +475,7 @@ mod test {
                                     .unwrap();
 
                             assert_eq!(sc.k(), k_folding);
-                            assert_eq!(sc.round(), round);
+                            assert_eq!(k - sc.k(), round);
 
                             let points = claims.iter().map(Claim::point).collect::<Vec<_>>();
                             let round =
@@ -517,7 +514,7 @@ mod test {
                                     .unwrap();
 
                                 assert_eq!(sc.k(), k_folding);
-                                assert_eq!(sc.round(), round);
+                                assert_eq!(k - sc.k(), round);
 
                                 {
                                     rounds.iter_mut().for_each(|round| round.extend(&rs));

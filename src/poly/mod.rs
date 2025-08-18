@@ -194,6 +194,7 @@ pub fn compressed_eq<F: Field>(points: &[Point<F>], alpha: F, shift: F) -> Poly<
     eq.iter_mut()
         .zip(alphas.iter())
         .for_each(|(e, alpha)| *e = *alpha);
+    // build eqs independently
     for i in 0..k {
         let (lo, hi) = eq.split_at_mut((1 << i) * n);
         lo.par_chunks_mut(n)
@@ -211,6 +212,7 @@ pub fn compressed_eq<F: Field>(points: &[Point<F>], alpha: F, shift: F) -> Poly<
             });
     }
 
+    // sum each row
     eq.par_chunks(n)
         .map(|row| row.iter().fold(F::ZERO, |acc, &v| acc + v))
         .collect::<Vec<_>>()
