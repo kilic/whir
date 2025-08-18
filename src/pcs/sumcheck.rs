@@ -3,7 +3,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIter
 
 use crate::{
     pcs::Claim,
-    poly::{Point, Poly},
+    poly::{compressed_eq, Point, Poly},
     transcript::{Challenge, Reader, Writer},
     utils::VecOps,
 };
@@ -25,14 +25,19 @@ fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &[F], y: &[Ext]) -> Ext {
         .product()
 }
 
-fn round_inner_ext<Transcript, F: Field, Ext: ExtensionField<F>>(
+fn round<
+    Transcript,
+    F: Field,
+    Ex0: ExtensionField<F>,
+    Ex1: ExtensionField<Ex0> + ExtensionField<F>,
+>(
     transcript: &mut Transcript,
-    sum: &mut Ext,
-    poly: &Poly<F>,
-    eq: &mut Poly<Ext>,
-) -> Result<(Poly<Ext>, Ext), crate::Error>
+    sum: &mut Ex1,
+    poly: &Poly<Ex0>,
+    eq: &mut Poly<Ex1>,
+) -> Result<Ex1, crate::Error>
 where
-    Transcript: Writer<Ext> + Challenge<F, Ext>,
+    Transcript: Writer<Ex1> + Challenge<F, Ex1>,
 {
     let mid = poly.len() / 2;
     let (plo, phi) = poly.split_at(mid);
@@ -44,51 +49,16 @@ where
         .zip(elo.par_iter().zip(ehi.par_iter()))
         .map(|((&p0, &p1), (&e0, &e1))| (e0 * p0, (e1.double() - e0) * (p1.double() - p0)))
         .reduce(
-            || (Ext::ZERO, Ext::ZERO),
+            || (Ex1::ZERO, Ex1::ZERO),
             |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
         );
 
     transcript.write(v0)?;
     transcript.write(v2)?;
     let round_poly = vec![v0, *sum - v0, v2];
-    let r = Challenge::<F, Ext>::draw(transcript);
+    let r = Challenge::<F, Ex1>::draw(transcript);
     *sum = extrapolate(&round_poly, r);
     eq.fix_var(r);
-    let poly = poly.fix_var_ext(r);
-    Ok((poly, r))
-}
-
-fn round_inner<Transcript, F: Field, Ext: ExtensionField<F>>(
-    transcript: &mut Transcript,
-    sum: &mut Ext,
-    poly: &mut Poly<Ext>,
-    eq: &mut Poly<Ext>,
-) -> Result<Ext, crate::Error>
-where
-    Transcript: Writer<Ext> + Challenge<F, Ext>,
-{
-    let mid = poly.len() / 2;
-    let (plo, phi) = poly.split_at(mid);
-    let (elo, ehi) = eq.split_at(mid);
-
-    let (v0, v2) = plo
-        .par_iter()
-        .zip(phi.par_iter())
-        .zip(elo.par_iter().zip(ehi.par_iter()))
-        .map(|((&p0, &p1), (&e0, &e1))| (e0 * p0, (e1.double() - e0) * (p1.double() - p0)))
-        .reduce(
-            || (Ext::ZERO, Ext::ZERO),
-            |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
-        );
-
-    transcript.write(v0)?;
-    transcript.write(v2)?;
-    let round_poly = vec![v0, *sum - v0, v2];
-    let r = Challenge::<F, Ext>::draw(transcript);
-    *sum = extrapolate(&round_poly, r);
-    eq.fix_var(r);
-    poly.fix_var(r);
-
     Ok(r)
 }
 
@@ -124,38 +94,36 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
 
     pub fn new<Transcript>(
         transcript: &mut Transcript,
-        k: usize,
         d: usize,
         alpha: Ext,
 
-        claims_ext: &[Claim<Ext, Ext>],
+        claims: &[Claim<Ext, Ext>],
         poly: &Poly<F>,
     ) -> Result<Self, crate::Error>
     where
         F: ExtensionField<F>,
         Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
     {
-        assert_eq!(poly.k(), k);
-        assert!(claims_ext.iter().all(|o| o.k() == k));
-        assert!(d > 0);
+        let k = poly.k();
+        claims.iter().for_each(|o| assert_eq!(o.k(), poly.k()));
+        assert!(k >= d);
 
-        let mut sum = claims_ext
+        let mut sum = claims
             .iter()
             .map(Claim::<Ext, Ext>::eval)
             .horner_shifted(alpha, alpha);
 
-        let eqs_ext = claims_ext.iter().map(Claim::eq).collect::<Vec<_>>();
-
-        let mut eq: Poly<_> = (0..1 << k)
-            .map(|i| eqs_ext.iter().map(|eq| &eq[i]).horner_shifted(alpha, alpha))
-            .collect::<Vec<_>>()
-            .into();
+        let points = claims.iter().map(Claim::point).collect::<Vec<_>>();
+        let mut eq = compressed_eq(&points, alpha, alpha);
 
         // first round
-        let (mut poly, r) = round_inner_ext(transcript, &mut sum, poly, &mut eq)?;
+        let r = round(transcript, &mut sum, poly, &mut eq)?;
+        // fix the first variable and get fixed new polynomial in extension field
+        let mut poly = poly.fix_var_ext(r);
         let mut rs: Point<Ext> = vec![r].into();
 
         #[cfg(debug_assertions)]
+        // debug if we applied round correctly
         assert_eq!(
             eq.iter()
                 .zip(poly.iter())
@@ -165,10 +133,13 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
 
         // rest
         (1..d).try_for_each(|_| {
-            let r = round_inner(transcript, &mut sum, &mut poly, &mut eq)?;
+            let r = round::<_, F, Ext, Ext>(transcript, &mut sum, &poly, &mut eq)?;
+            // fix the next variable using same space
+            poly.fix_var(r);
             rs.push(r);
 
             #[cfg(debug_assertions)]
+            // debug if we applied round correctly
             assert_eq!(
                 eq.iter()
                     .zip(poly.iter())
@@ -199,8 +170,8 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
     where
         Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
     {
-        assert!(claims_base.iter().all(|o| o.k() == self.k()));
-        assert!(claims_ext.iter().all(|o| o.k() == self.k()));
+        claims_ext.iter().for_each(|o| assert_eq!(o.k(), self.k()));
+        claims_base.iter().for_each(|o| assert_eq!(o.k(), self.k()));
 
         self.sum = std::iter::once(&self.sum)
             .chain(claims_base.iter().map(Claim::<F, Ext>::eval))
@@ -223,7 +194,12 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         });
 
         let rs = (0..d)
-            .map(|_| round_inner(transcript, &mut self.sum, &mut self.poly, &mut self.eq))
+            .map(|_| {
+                let r =
+                    round::<_, F, Ext, Ext>(transcript, &mut self.sum, &self.poly, &mut self.eq)?;
+                self.poly.fix_var(r);
+                Ok(r)
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         self.rs.extend(rs.iter());
@@ -328,8 +304,8 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
     where
         Transcript: Reader<Ext> + Challenge<F, Ext>,
     {
-        assert!(claims_base.iter().all(|o| { o.k() == self.k }));
-        assert!(claims_ext.iter().all(|o| o.k() == self.k));
+        claims_ext.iter().for_each(|o| assert_eq!(o.k(), self.k()));
+        claims_base.iter().for_each(|o| assert_eq!(o.k(), self.k()));
 
         // update sum
         self.sum = std::iter::once(&self.sum)
@@ -423,9 +399,8 @@ mod test {
                     make_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly).unwrap();
 
                 let alpha = Challenge::<F, Ext>::draw(&mut transcript);
-                let sc =
-                    super::Sumcheck::<F, Ext>::new(&mut transcript, k, d, alpha, &claims, &poly)
-                        .unwrap();
+                let sc = super::Sumcheck::<F, Ext>::new(&mut transcript, d, alpha, &claims, &poly)
+                    .unwrap();
 
                 assert_eq!(sc.k(), k - d);
                 {
@@ -499,7 +474,7 @@ mod test {
 
                             let alpha = Challenge::<F, Ext>::draw(&mut transcript);
                             let sc =
-                                super::Sumcheck::new(&mut transcript, k, d, alpha, &claims, &poly)
+                                super::Sumcheck::new(&mut transcript, d, alpha, &claims, &poly)
                                     .unwrap();
 
                             assert_eq!(sc.k(), k_folding);
