@@ -103,28 +103,21 @@ impl<F: Field> Point<F> {
             return constant.into();
         }
 
-        let k = poly.k();
-        assert_eq!(k, self.len());
+        let (z0, z1) = self.split_at(self.len() / 2);
+        let left = z0.eq(F::ONE);
+        let right = z1.eq(F::ONE);
 
-        let mid = 1 << (k - 1);
-        let (lo, hi) = poly.split_at(mid);
-        let mut poly: Vec<F> = unsafe_allocate_zero_vec(mid);
-        let z0 = *self.last().unwrap();
-        lo.par_iter()
-            .zip_eq(hi.par_iter())
-            .zip_eq(poly.par_iter_mut())
-            .for_each(|((&a0, &a1), t)| *t = z0 * (a1 - a0) + a0);
-
-        for &zi in self.iter().rev().skip(1) {
-            let mid = poly.len() / 2;
-            let (lo, hi) = poly.split_at_mut(mid);
-            lo.par_iter_mut()
-                .zip(hi.par_iter())
-                .for_each(|(a0, a1)| *a0 += zi * (*a1 - *a0));
-            poly.truncate(mid);
-        }
-        assert_eq!(poly.k(), 0);
-        poly[0]
+        assert_eq!(poly.k(), left.k() + right.k());
+        poly.par_chunks(left.len())
+            .zip_eq(right.par_iter())
+            .map(|(part, &c)| {
+                part.iter()
+                    .zip_eq(left.iter())
+                    .map(|(&a, &b)| b * a)
+                    .sum::<F>()
+                    * c
+            })
+            .sum()
     }
 
     pub fn eval_coeffs<BaseField: Field>(&self, poly: &[BaseField]) -> F
@@ -159,7 +152,9 @@ impl<F: Field> Point<F> {
     }
 
     pub fn eq(&self, scale: F) -> Poly<F> {
-        assert!(!self.is_empty());
+        if self.is_empty() {
+            return vec![F::ONE].into();
+        }
         assert_ne!(scale, F::ZERO);
         let k = self.len();
         let mut eq = unsafe_allocate_zero_vec(1 << k);
@@ -354,12 +349,12 @@ mod test {
         poly::{compressed_eq, Point, Poly},
         utils::{unsafe_allocate_zero_vec, VecOps},
     };
+    use p3_baby_bear::BabyBear;
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
     use p3_field::extension::BinomialExtensionField;
-    use p3_goldilocks::Goldilocks;
 
-    type F = Goldilocks;
-    type Ext = BinomialExtensionField<F, 2>;
+    type F = BabyBear;
+    type Ext = BinomialExtensionField<F, 4>;
     use p3_field::PrimeCharacteristicRing;
     use p3_matrix::dense::RowMajorMatrix;
     use rand::Rng;
@@ -369,7 +364,7 @@ mod test {
     };
 
     #[test]
-    fn test_multi_eq() {
+    fn test_compressed_eq() {
         let k = 18;
         let n = 12;
         let mut rng = crate::test::rng(1);

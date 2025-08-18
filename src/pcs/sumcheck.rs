@@ -99,9 +99,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         F: ExtensionField<F>,
         Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
     {
-        // let k = poly.k();
         claims.iter().for_each(|o| assert_eq!(o.k(), poly.k()));
-        // assert!(k >= d);
 
         // calculate compressed sum of initial claims
         let mut sum = claims
@@ -147,7 +145,6 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         })?;
 
         Ok(Self {
-            // k,
             sum,
             rs,
             eq,
