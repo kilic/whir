@@ -172,48 +172,6 @@ impl<F: Field> Point<F> {
     }
 }
 
-pub fn compressed_eq<F: Field>(points: &[Point<F>], alpha: F, shift: F) -> Poly<F> {
-    assert!(!points.is_empty());
-    let k = points.first().unwrap().len();
-    points.iter().for_each(|point| assert_eq!(point.len(), k));
-    let n = points.len();
-
-    let mut eq = crate::utils::unsafe_allocate_zero_vec((1 << k) * n);
-    // prepare RLC coeffs
-    let alphas = alpha
-        .powers()
-        .take(n)
-        .map(|alpha| alpha * shift)
-        .collect::<Vec<_>>();
-    // initialize first row with randomness factors
-    eq.iter_mut()
-        .zip(alphas.iter())
-        .for_each(|(e, alpha)| *e = *alpha);
-    // build eqs independently
-    for i in 0..k {
-        let (lo, hi) = eq.split_at_mut((1 << i) * n);
-        lo.par_chunks_mut(n)
-            .zip(hi.par_chunks_mut(n))
-            .for_each(|(lo, hi)| {
-                points
-                    .iter()
-                    .zip(lo.iter_mut())
-                    .zip(hi.iter_mut())
-                    .for_each(|((point, a0), a1)| {
-                        let zi = point[i];
-                        *a1 = *a0 * zi;
-                        *a0 -= *a1;
-                    });
-            });
-    }
-
-    // sum each row
-    eq.par_chunks(n)
-        .map(|row| row.iter().fold(F::ZERO, |acc, &v| acc + v))
-        .collect::<Vec<_>>()
-        .into()
-}
-
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct Poly<F> {
     pub values: Vec<F>,
@@ -345,10 +303,7 @@ impl<F: Field> Poly<F> {
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        poly::{compressed_eq, Point, Poly},
-        utils::{unsafe_allocate_zero_vec, VecOps},
-    };
+    use crate::poly::{Point, Poly};
     use p3_baby_bear::BabyBear;
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
     use p3_field::extension::BinomialExtensionField;
@@ -358,57 +313,6 @@ mod test {
     use p3_field::PrimeCharacteristicRing;
     use p3_matrix::dense::RowMajorMatrix;
     use rand::Rng;
-    use rayon::iter::{
-        IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator,
-        ParallelIterator,
-    };
-
-    #[test]
-    fn test_compressed_eq() {
-        let k = 18;
-        let n = 12;
-        let mut rng = crate::test::rng(1);
-        let alpha: F = rng.random();
-        let shift: F = rng.random();
-        // crate::test::init_tracing();
-
-        let points = (0..n)
-            .map(|_| Point::<F>::rand(&mut rng, k))
-            .collect::<Vec<_>>();
-
-        let eq0: Poly<_> = tracing::info_span!("eq0").in_scope(|| {
-            let eqs = points
-                .iter()
-                .map(|point| point.eq(F::ONE))
-                .collect::<Vec<_>>();
-            (0..1 << k)
-                .map(|i| eqs.iter().map(|eq| &eq[i]).horner_shifted(alpha, shift))
-                .collect::<Vec<_>>()
-                .into()
-        });
-
-        let eq1 = tracing::info_span!("eq1").in_scope(|| compressed_eq(&points, alpha, shift));
-        assert_eq!(eq0, eq1);
-
-        let alphas = alpha
-            .powers()
-            .take(n)
-            .map(|alpha| alpha * shift)
-            .collect::<Vec<_>>();
-        let mut eq2: Vec<F> = unsafe_allocate_zero_vec(1 << k);
-        tracing::info_span!("eq2").in_scope(|| {
-            let eqs = points
-                .iter()
-                .map(|point| point.eq(F::ONE))
-                .collect::<Vec<_>>();
-            for (eq, alpha) in eqs.iter().zip(alphas.iter()) {
-                eq2.par_iter_mut()
-                    .zip(eq.par_iter())
-                    .for_each(|(e, &v)| *e += v * *alpha);
-            }
-        });
-        assert_eq!(eq0, eq2.into());
-    }
 
     #[test]
     fn test_eval() {

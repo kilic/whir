@@ -1,9 +1,14 @@
 use p3_field::{ExtensionField, Field};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 
+mod eq;
+
 use crate::{
-    pcs::Claim,
-    poly::{compressed_eq, Point, Poly},
+    pcs::{
+        sumcheck::eq::{compress_eqs_base, compress_eqs_ext},
+        Claim,
+    },
+    poly::{Point, Poly},
     transcript::{Challenge, Reader, Writer},
     utils::VecOps,
 };
@@ -87,6 +92,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         &self.rs
     }
 
+    #[tracing::instrument(skip_all, fields(k = poly.k(), d = d, claims = claims.len()))]
     pub fn new<Transcript>(
         transcript: &mut Transcript,
         d: usize,
@@ -109,7 +115,8 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
 
         // calculate compressed eqs of initial claims
         let points = claims.iter().map(Claim::point).collect::<Vec<_>>();
-        let mut eq = compressed_eq(&points, alpha, alpha);
+        let mut eq: Poly<Ext> = Poly::zero(poly.k());
+        compress_eqs_ext((&mut eq, false), &points, alpha, alpha);
 
         // first round
         let r = round(transcript, &mut sum, poly, &mut eq)?;
@@ -153,6 +160,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         })
     }
 
+    #[tracing::instrument(skip_all, fields(k = self.k(), d = d, base = claims_base.len(), ext = claims_ext.len()))]
     pub fn fold<Transcript>(
         &mut self,
         transcript: &mut Transcript,
@@ -167,26 +175,24 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         claims_ext.iter().for_each(|o| assert_eq!(o.k(), self.k()));
         claims_base.iter().for_each(|o| assert_eq!(o.k(), self.k()));
 
+        // accumulate new claims to the current sum
         self.sum = std::iter::once(&self.sum)
             .chain(claims_base.iter().map(Claim::<F, Ext>::eval))
             .chain(claims_ext.iter().map(Claim::<Ext, Ext>::eval))
             .horner(alpha);
 
-        let eqs_base = claims_base.iter().map(Claim::eq).collect::<Vec<_>>();
-        let eqs_ext = claims_ext.iter().map(Claim::eq).collect::<Vec<_>>();
+        // accumulate new claims to the current eq
+        let points_base = claims_base.iter().map(Claim::point).collect::<Vec<_>>();
+        let points_ext = claims_ext.iter().map(Claim::point).collect::<Vec<_>>();
+        compress_eqs_base((&mut self.eq, true), &points_base, alpha, alpha);
+        compress_eqs_ext(
+            (&mut self.eq, true),
+            &points_ext,
+            alpha,
+            alpha.exp_u64(points_base.len() as u64 + 1),
+        );
 
-        let alpha_shift = alpha.exp_u64(eqs_base.len() as u64 + 1);
-        self.eq.iter_mut().enumerate().for_each(|(i, cur)| {
-            *cur += eqs_base
-                .iter()
-                .map(|eq| &eq[i])
-                .horner_shifted(alpha, alpha)
-                + eqs_ext
-                    .iter()
-                    .map(|eq| &eq[i])
-                    .horner_shifted(alpha, alpha_shift)
-        });
-
+        // run sumcheck rounds
         let rs = (0..d)
             .map(|_| {
                 let r =
@@ -196,8 +202,10 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // update round challenges
         self.rs.extend(rs.iter());
 
+        // return round point
         Ok(rs.into())
     }
 }
