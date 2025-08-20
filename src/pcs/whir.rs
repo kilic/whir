@@ -11,7 +11,7 @@ use crate::{
         sumcheck::{Sumcheck, SumcheckVerifier},
         Claim,
     },
-    poly::{Point, Poly},
+    poly::{Coeff, Point, Poly},
     transcript::{Challenge, ChallengeBits, Reader, Writer},
     utils::{unsafe_allocate_zero_vec, TwoAdicSlice},
 };
@@ -103,19 +103,14 @@ impl<
     pub fn commit<Transcript, DFT: TwoAdicSubgroupDft<F>>(
         &self,
         transcript: &mut Transcript,
-        poly_in_coeffs: &Poly<F>,
+        poly: &Poly<F, Coeff>,
     ) -> Result<MatrixCommitmentData<F, MCom::Digest>, crate::Error>
     where
         Transcript: Writer<Ext> + Writer<MCom::Digest> + Challenge<F, Ext>,
     {
-        let mut transposed = unsafe_allocate_zero_vec(poly_in_coeffs.len());
+        let mut transposed = unsafe_allocate_zero_vec(poly.len());
         let width = 1 << self.folding;
-        transpose::transpose(
-            poly_in_coeffs,
-            &mut transposed,
-            poly_in_coeffs.len() / width,
-            width,
-        );
+        transpose::transpose(poly, &mut transposed, poly.len() / width, width);
         commit::<_, _, _, _, DFT>(transcript, &transposed, self.rate, self.folding, &self.comm)
     }
 
@@ -133,7 +128,7 @@ impl<
         transcript: &mut Transcript,
         claims: Vec<Claim<Ext, Ext>>,
         comm_data: MatrixCommitmentData<F, MCom::Digest>,
-        poly_in_coeffs: &Poly<F>,
+        poly: Poly<F, Coeff>,
     ) -> Result<(), crate::Error>
     where
         Transcript: Writer<F>
@@ -143,7 +138,7 @@ impl<
             + Challenge<F, Ext>
             + ChallengeBits,
     {
-        assert_eq!(poly_in_coeffs.k(), self.k);
+        assert_eq!(poly.k(), self.k);
 
         let n_ood_queries = self.n_ood_queries(self.k, self.rate);
         // draw an univarite point
@@ -152,9 +147,9 @@ impl<
         let ood_claims = (0..n_ood_queries)
             .map(|_| {
                 let point: Ext = Challenge::draw(transcript);
-                let eval = poly_in_coeffs.eval_univariate(point);
+                let eval = poly.eval_univariate(point);
                 transcript.write(eval)?;
-                let point = Point::expand(poly_in_coeffs.k(), point);
+                let point = Point::expand(poly.k(), point);
                 Ok(Claim::new(point, eval))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -165,13 +160,8 @@ impl<
         let alpha: Ext = Challenge::draw(transcript);
         // initialize the sumcheck instance
         // `self.folding` number of rounds is run
-        let mut sumcheck = Sumcheck::new(
-            transcript,
-            self.folding,
-            alpha,
-            &claims,
-            &poly_in_coeffs.clone().to_lagrange(),
-        )?;
+        let mut sumcheck =
+            Sumcheck::new(transcript, self.folding, alpha, &claims, &poly.to_evals())?;
 
         // derive number of rounds
         let (n_rounds, final_sumcheck_rounds) = compute_number_of_rounds(self.folding, self.k);
@@ -252,13 +242,13 @@ impl<
                     .iter()
                     .zip(points.iter())
                     .map(|(local_poly, &point)| {
-                        let eval =
-                            Poly::new(local_poly.to_vec()).eval_coeffs(&round_point.reversed());
+                        let eval = Poly::<_, Coeff>::new(local_poly.to_vec())
+                            .eval(&round_point.reversed());
                         let poly = sumcheck.poly();
                         let point = Point::expand(poly.k(), point);
 
                         #[cfg(debug_assertions)]
-                        assert_eq!(eval, sumcheck.poly().eval_lagrange(&point.as_ext::<Ext>()));
+                        assert_eq!(eval, sumcheck.poly().eval(&point.as_ext::<Ext>()));
 
                         Claim::new(point, eval)
                     })
@@ -277,13 +267,13 @@ impl<
                     .iter()
                     .zip(points.iter())
                     .map(|(local_poly, &point)| {
-                        let eval =
-                            Poly::new(local_poly.to_vec()).eval_coeffs(&round_point.reversed());
+                        let eval = Poly::<_, Coeff>::new(local_poly.to_vec())
+                            .eval(&round_point.reversed());
                         let poly = sumcheck.poly();
                         let point = Point::expand(poly.k(), point);
 
                         #[cfg(debug_assertions)]
-                        assert_eq!(eval, sumcheck.poly().eval_lagrange(&point.as_ext::<Ext>()));
+                        assert_eq!(eval, sumcheck.poly().eval(&point.as_ext::<Ext>()));
 
                         Claim::new(point, eval)
                     })
@@ -327,7 +317,7 @@ impl<
                     .zip(indicies.iter())
                     .for_each(|(local_poly, &index)| {
                         let point = omega.exp_u64(index as u64);
-                        let eval = Poly::new(local_poly.to_vec()).eval_coeffs(&round_point);
+                        let eval = Poly::<_, Coeff>::new(local_poly.to_vec()).eval(&round_point);
                         assert_eq!(eval, poly_in_coeffs.eval_univariate(Ext::from(point)));
                     });
             }
@@ -346,7 +336,7 @@ impl<
                     .zip(indicies.iter())
                     .for_each(|(local_poly, &index)| {
                         let point = omega.exp_u64(index as u64);
-                        let eval = Poly::new(local_poly.to_vec()).eval_coeffs(&round_point);
+                        let eval = Poly::<_, Coeff>::new(local_poly.to_vec()).eval(&round_point);
                         assert_eq!(eval, poly_in_coeffs.eval_univariate(Ext::from(point)));
                     });
             }
@@ -444,7 +434,7 @@ impl<
                         let point = Point::expand(sumcheck.k(), omega.exp_u64(index as u64));
                         // evaluate the local polynomial at the round point
                         // and return the claim for sumcheck
-                        let eval = Poly::new(local_poly).eval_coeffs(&round_point.reversed());
+                        let eval = Poly::<_, Coeff>::new(local_poly).eval(&round_point.reversed());
                         Ok(Claim::new(point, eval))
                     })
                     .collect::<Result<Vec<_>, _>>()
@@ -465,7 +455,7 @@ impl<
                         let point = Point::expand(sumcheck.k(), omega.exp_u64(index as u64));
                         // evaluate the local polynomial at the round point
                         // and return the claim for sumcheck
-                        let eval = Poly::new(local_poly).eval_coeffs(&round_point.reversed());
+                        let eval = Poly::<_, Coeff>::new(local_poly).eval(&round_point.reversed());
                         Ok(Claim::new(point, eval))
                     })
                     .collect::<Result<Vec<_>, _>>()
@@ -483,7 +473,7 @@ impl<
 
         // read the final polynomial
         assert_eq!(sumcheck.k(), final_sumcheck_rounds);
-        let poly_in_coeffs: Poly<Ext> = Poly::new(transcript.read_many(1 << sumcheck.k())?);
+        let poly_in_coeffs = Poly::<Ext, Coeff>::new(transcript.read_many(1 << sumcheck.k())?);
 
         // derive round params for the final set of rounds
         let rate_step = self.folding - 1;
@@ -511,7 +501,7 @@ impl<
                     // derive the univariate point
                     let point = omega.exp_u64(index as u64);
                     // evaluate the local polynomial at the round point
-                    let eval = Poly::new(local_poly).eval_coeffs(&round_point.reversed());
+                    let eval = Poly::<_, Coeff>::new(local_poly).eval(&round_point.reversed());
 
                     // verify stir evaluations against final polynomial
                     (eval == poly_in_coeffs.eval_univariate(Ext::from(point)))
@@ -539,7 +529,7 @@ impl<
                     // derive the univariate point
                     let point = omega.exp_u64(index as u64);
                     // evaluate the local polynomial at the round point
-                    let eval = Poly::new(local_poly).eval_coeffs(&round_point.reversed());
+                    let eval = Poly::<_, Coeff>::new(local_poly).eval(&round_point.reversed());
 
                     // verify stir evaluations against final polynomial
                     (eval == poly_in_coeffs.eval_univariate(Ext::from(point)))
@@ -554,7 +544,7 @@ impl<
                 .collect::<Result<Vec<_>, _>>()
         }?;
 
-        sumcheck.finalize(transcript, Some(poly_in_coeffs.clone().to_lagrange()))?;
+        sumcheck.finalize(transcript, Some(poly_in_coeffs.clone().to_evals()))?;
         Ok(())
     }
 }

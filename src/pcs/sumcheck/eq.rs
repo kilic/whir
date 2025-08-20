@@ -134,7 +134,7 @@ pub(super) fn compress_eqs_base<F: Field, Ext: ExtensionField<F>>(
 mod test {
     use super::{compress_eqs_base, compress_eqs_ext};
     use crate::{
-        poly::{Point, Poly},
+        poly::{Eval, Point, Poly},
         utils::{unsafe_allocate_zero_vec, VecOps},
     };
     use p3_baby_bear::BabyBear;
@@ -158,7 +158,7 @@ mod test {
         shift: Ext,
         points_base: &[Point<F>],
         points_ext: &[Point<Ext>],
-    ) -> Poly<Ext> {
+    ) -> Poly<Ext, Eval> {
         let eqs_base = points_base
             .iter()
             .map(|point| point.eq(F::ONE))
@@ -341,7 +341,7 @@ mod test {
         let eq0 = tracing::info_span!("eq0")
             .in_scope(|| compress_eqs_naive(k, n_base, alpha, shift, &points_base, &points_ext));
 
-        let mut eq1: Poly<Ext> = unsafe_allocate_zero_vec(1 << k).into();
+        let mut eq1: Poly<Ext, Eval> = unsafe_allocate_zero_vec(1 << k).into();
         tracing::info_span!("eq1").in_scope(|| {
             compress_eq_alternative2(
                 (&mut eq1, false),
@@ -354,13 +354,13 @@ mod test {
         });
         assert_eq!(eq0, eq1);
 
-        let mut eq2: Poly<Ext> = unsafe_allocate_zero_vec(1 << k).into();
+        let mut eq2: Poly<Ext, Eval> = unsafe_allocate_zero_vec(1 << k).into();
         tracing::info_span!("eq2").in_scope(|| {
             compress_eqs_alternative1((&mut eq2, false), alpha, shift, &points_base, &points_ext)
         });
         assert_eq!(eq0, eq2);
 
-        let mut eq3: Poly<Ext> = unsafe_allocate_zero_vec(1 << k).into();
+        let mut eq3: Poly<Ext, Eval> = unsafe_allocate_zero_vec(1 << k).into();
         tracing::info_span!("eq3").in_scope(|| {
             compress_eqs_base((&mut eq3, false), &points_base, alpha, shift);
             compress_eqs_ext(

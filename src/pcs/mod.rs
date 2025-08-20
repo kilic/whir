@@ -1,4 +1,4 @@
-use crate::poly::{Point, Poly};
+use crate::poly::{Eval, Point, Poly};
 use p3_field::{ExtensionField, Field};
 
 pub mod params;
@@ -20,7 +20,7 @@ impl<F: Field, Ext: ExtensionField<F>> Claim<F, Ext> {
         self.point.len()
     }
 
-    pub fn eq(&self) -> Poly<F> {
+    pub fn eq(&self) -> Poly<F, Eval> {
         self.point.eq(F::ONE)
     }
 
@@ -39,7 +39,7 @@ mod test {
         field::SerializedField,
         merkle::{MerkleTree, RustCrypto},
         pcs::{params::SecurityAssumption, whir::Whir, Claim},
-        poly::{Point, Poly},
+        poly::{Coeff, Eval, Point, Poly},
         transcript::{
             rust_crypto::{RustCryptoReader, RustCryptoWriter},
             Challenge, Reader, Writer,
@@ -61,7 +61,7 @@ mod test {
     >(
         transcript: &mut Transcript,
         n_points: usize,
-        poly: &Poly<Ex0>,
+        poly: &Poly<Ex0, Eval>,
     ) -> Result<Vec<Claim<Ex1, Ex1>>, crate::Error>
     where
         Transcript: Challenge<F, Ex1> + Writer<Ex1>,
@@ -69,7 +69,7 @@ mod test {
         (0..n_points)
             .map(|_| {
                 let point = Point::expand(poly.k(), transcript.draw());
-                let eval = poly.eval_lagrange(&point);
+                let eval = poly.eval(&point);
                 let claim = Claim { point, eval };
                 transcript.write(claim.eval)?;
                 Ok(claim)
@@ -80,7 +80,7 @@ mod test {
     pub(crate) fn make_claims_base<Transcript, F: Field, Ex0: ExtensionField<F>>(
         transcript: &mut Transcript,
         n_points: usize,
-        poly: &Poly<Ex0>,
+        poly: &Poly<Ex0, Eval>,
     ) -> Result<Vec<Claim<F, Ex0>>, crate::Error>
     where
         Transcript: Challenge<F, F> + Writer<Ex0>,
@@ -88,7 +88,7 @@ mod test {
         (0..n_points)
             .map(|_| {
                 let point = Point::expand(poly.k(), transcript.draw());
-                let eval = poly.eval_lagrange(&point.as_ext::<Ex0>());
+                let eval = poly.eval(&point.as_ext::<Ex0>());
                 let claim = Claim { point, eval };
                 transcript.write(claim.eval)?;
                 Ok(claim)
@@ -140,8 +140,8 @@ mod test {
 
         let k = 7usize;
         let mut rng = &mut crate::test::rng(1);
-        let poly_in_coeffs: Poly<F> = Poly::rand(&mut rng, k);
-        let poly_in_lagrange: Poly<F> = poly_in_coeffs.clone().to_lagrange();
+        let poly_in_coeffs: Poly<F, Coeff> = Poly::rand(&mut rng, k);
+        let poly_in_evals = poly_in_coeffs.clone().to_evals();
         let size = 1 << k;
 
         for folding in 0..k {
@@ -164,18 +164,18 @@ mod test {
                     .dft_algebra_batch(RowMajorMatrix::new(padded, width));
 
                 // simulate sumcheck folding
-                let mut poly_in_lagrange = poly_in_lagrange.clone();
+                let mut poly_in_evals = poly_in_evals.clone();
                 let rs: Point<F> = (0..folding)
                     .map(|_| {
                         let r: F = rng.random();
-                        poly_in_lagrange.fix_var(r);
+                        poly_in_evals.fix_var(r);
                         r
                     })
                     .collect::<Vec<_>>()
                     .into();
 
                 // poly to send to verifier
-                let poly_in_coeffs = poly_in_lagrange.to_coeffs();
+                let poly_in_coeffs = poly_in_evals.to_coeffs();
 
                 // find the domain generator
                 let domain_size = rate - folding;
@@ -185,12 +185,12 @@ mod test {
                 for (index, row) in codeword.rows().enumerate() {
                     let wi = omega.exp_u64(index as u64);
                     let point = Point::<F>::expand(poly_in_coeffs.k(), wi);
-                    let e0 = poly_in_coeffs.eval_coeffs(&point);
+                    let e0 = poly_in_coeffs.eval(&point);
                     let e1 = poly_in_coeffs.eval_univariate(wi);
                     assert_eq!(e0, e1);
 
-                    let row: Poly<F> = row.collect::<Vec<_>>().into();
-                    let e1 = row.eval_coeffs(&rs.reversed());
+                    let row: Poly<F, Coeff> = row.collect::<Vec<_>>().into();
+                    let e1 = row.eval(&rs.reversed());
                     assert_eq!(e0, e1);
                 }
             }
@@ -226,8 +226,8 @@ mod test {
 
         let mut rng = &mut crate::test::rng(1);
         let (proof, checkpoint_prover) = {
-            let poly_in_coeffs: Poly<F> = Poly::rand(&mut rng, k);
-            let poly_in_lagrange: Poly<F> = poly_in_coeffs.clone().to_lagrange();
+            let poly_in_coeffs: Poly<F, Coeff> = Poly::rand(&mut rng, k);
+            let poly_in_evals = poly_in_coeffs.clone().to_evals();
 
             let mut transcript = Writer::init("test");
             let data = whir
@@ -235,9 +235,9 @@ mod test {
                 .unwrap();
 
             let claims =
-                make_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly_in_lagrange)
+                make_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly_in_evals)
                     .unwrap();
-            whir.open::<_, Radix2DitParallel<Ext>>(&mut transcript, claims, data, &poly_in_coeffs)
+            whir.open::<_, Radix2DitParallel<Ext>>(&mut transcript, claims, data, poly_in_coeffs)
                 .unwrap();
 
             let checkpoint: F = transcript.draw();

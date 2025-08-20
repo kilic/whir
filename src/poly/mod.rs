@@ -94,7 +94,7 @@ impl<F: Field> Point<F> {
         self.iter().map(|&z| z.into()).collect_vec().into()
     }
 
-    pub fn eval_lagrange<BaseField: Field>(&self, poly: &[BaseField]) -> F
+    pub(super) fn eval_poly_in_evals<BaseField: Field>(&self, poly: &[BaseField]) -> F
     where
         F: ExtensionField<BaseField>,
     {
@@ -120,7 +120,7 @@ impl<F: Field> Point<F> {
             .sum()
     }
 
-    pub fn eval_coeffs<BaseField: Field>(&self, poly: &[BaseField]) -> F
+    pub(super) fn eval_poly_in_coeffs<BaseField: Field>(&self, poly: &[BaseField]) -> F
     where
         F: ExtensionField<BaseField>,
     {
@@ -151,7 +151,7 @@ impl<F: Field> Point<F> {
         sum
     }
 
-    pub fn eq(&self, scale: F) -> Poly<F> {
+    pub fn eq(&self, scale: F) -> Poly<F, Eval> {
         if self.is_empty() {
             return vec![F::ONE].into();
         }
@@ -172,47 +172,62 @@ impl<F: Field> Point<F> {
     }
 }
 
+pub trait Basis: Default {}
+
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
-pub struct Poly<F> {
+pub struct Coeff {}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct Eval {}
+
+impl Basis for Coeff {}
+impl Basis for Eval {}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct Poly<F, Basis> {
     pub values: Vec<F>,
+    pub basis: Basis,
 }
 
-impl<F> std::ops::Deref for Poly<F> {
+impl<F, Basis> std::ops::Deref for Poly<F, Basis> {
     type Target = Vec<F>;
     fn deref(&self) -> &Self::Target {
         &self.values
     }
 }
 
-impl<F> std::ops::DerefMut for Poly<F> {
+impl<F, Basis> std::ops::DerefMut for Poly<F, Basis> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.values
     }
 }
 
-impl<F: Field> From<Vec<F>> for Poly<F> {
+impl<F: Field, B: Basis> From<Vec<F>> for Poly<F, B> {
     fn from(values: Vec<F>) -> Self {
         Self::new(values)
     }
 }
 
-impl<F: Field> From<&[F]> for Poly<F> {
+impl<F: Field, B: Basis> From<&[F]> for Poly<F, B> {
     fn from(values: &[F]) -> Self {
         Self::new(values.to_vec())
     }
 }
 
-impl<F: Field> From<&Vec<F>> for Poly<F> {
+impl<F: Field, B: Basis> From<&Vec<F>> for Poly<F, B> {
     fn from(values: &Vec<F>) -> Self {
         Self::new(values.clone())
     }
 }
 
-impl<F: Field> Poly<F> {
+impl<F: Field, B: Basis> Poly<F, B> {
     pub fn new(values: Vec<F>) -> Self {
         assert!(!values.is_empty());
         assert!(values.len().is_power_of_two());
-        Self { values }
+        Self {
+            values,
+            basis: B::default(),
+        }
     }
 
     pub fn rand(rng: &mut impl rand::Rng, k: usize) -> Self
@@ -225,6 +240,7 @@ impl<F: Field> Poly<F> {
     pub fn zero(k: usize) -> Self {
         Self {
             values: unsafe_allocate_zero_vec(1 << k),
+            basis: B::default(),
         }
     }
 
@@ -236,23 +252,45 @@ impl<F: Field> Poly<F> {
         (self.len() == 1).then_some(*self.first().unwrap())
     }
 
-    pub fn eval_lagrange<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
-        point.eval_lagrange(self)
+    pub fn values(&self) -> &[F] {
+        &self.values
+    }
+}
+
+impl<F: Field> Poly<F, Coeff> {
+    pub fn eval<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
+        point.eval_poly_in_coeffs(self)
+    }
+
+    pub fn to_evals(mut self) -> Poly<F, Eval> {
+        self.par_chunks_mut(2)
+            .for_each(|chunk| chunk[1] += chunk[0]);
+
+        for i in 2..=self.k() {
+            let chunk_size = 1 << i;
+            self.par_chunks_mut(chunk_size).for_each(|chunk| {
+                let mid = chunk_size >> 1;
+                (mid..chunk_size).for_each(|j| chunk[j] += chunk[j - mid]);
+            });
+        }
+
+        Poly {
+            values: self.values,
+            basis: Eval {},
+        }
     }
 
     pub fn eval_univariate<Ext: ExtensionField<F>>(&self, point: Ext) -> Ext {
         crate::utils::par_horner(&self.values, point)
     }
+}
 
-    pub fn eval_coeffs<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
-        point.eval_coeffs(self)
+impl<F: Field> Poly<F, Eval> {
+    pub fn eval<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
+        point.eval_poly_in_evals(self)
     }
 
-    pub fn values(&self) -> &[F] {
-        &self.values
-    }
-
-    pub fn to_coeffs(mut self) -> Poly<F> {
+    pub fn to_coeffs(mut self) -> Poly<F, Coeff> {
         self.par_chunks_mut(2)
             .for_each(|chunk| chunk[1] -= chunk[0]);
 
@@ -264,21 +302,14 @@ impl<F: Field> Poly<F> {
             });
         }
 
-        self
+        Poly {
+            values: self.values,
+            basis: Coeff {},
+        }
     }
 
-    pub fn to_lagrange(mut self) -> Poly<F> {
-        self.par_chunks_mut(2)
-            .for_each(|chunk| chunk[1] += chunk[0]);
-
-        for i in 2..=self.k() {
-            let chunk_size = 1 << i;
-            self.par_chunks_mut(chunk_size).for_each(|chunk| {
-                let mid = chunk_size >> 1;
-                (mid..chunk_size).for_each(|j| chunk[j] += chunk[j - mid]);
-            });
-        }
-        self
+    pub fn eval_univariate<Ext: ExtensionField<F>>(&self, point: Ext) -> Ext {
+        crate::utils::par_horner(&self.values, point)
     }
 
     pub fn fix_var(&mut self, zi: F) {
@@ -290,7 +321,7 @@ impl<F: Field> Poly<F> {
         self.truncate(mid);
     }
 
-    pub fn fix_var_ext<Ext: ExtensionField<F>>(&self, zi: Ext) -> Poly<Ext> {
+    pub fn fix_var_ext<Ext: ExtensionField<F>>(&self, zi: Ext) -> Poly<Ext, Eval> {
         let mid = self.len() / 2;
         let (p0, p1) = self.split_at(mid);
         p0.par_iter()
@@ -303,7 +334,7 @@ impl<F: Field> Poly<F> {
 
 #[cfg(test)]
 mod test {
-    use crate::poly::{Point, Poly};
+    use crate::poly::{Coeff, Eval, Point, Poly};
     use p3_baby_bear::BabyBear;
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
     use p3_field::extension::BinomialExtensionField;
@@ -318,17 +349,17 @@ mod test {
     fn test_eval() {
         let mut rng = crate::test::rng(1);
         let k = 5;
-        let poly0 = Poly::<F>::rand(&mut rng, k);
+        let poly0 = Poly::<F, Eval>::rand(&mut rng, k);
         let poly1 = poly0.clone().to_coeffs();
-        let poly2 = poly1.clone().to_lagrange();
+        let poly2 = poly1.clone().to_evals();
         assert_eq!(poly0, poly2);
         for i in 0..(1 << k) {
             let e0 = poly0[i];
 
             let point = Point::<F>::hypercube(i, k);
-            let e1 = point.eval_lagrange(&poly0);
+            let e1 = point.eval_poly_in_evals(&poly0);
             assert_eq!(e0, e1);
-            let e1 = point.eval_coeffs(&poly1);
+            let e1 = point.eval_poly_in_coeffs(&poly1);
             assert_eq!(e0, e1);
             let mut poly2 = poly0.clone();
             point.iter().rev().for_each(|&var| poly2.fix_var(var));
@@ -338,8 +369,8 @@ mod test {
 
         for _ in 0..1000 {
             let point = Point::<Ext>::rand(&mut rng, k);
-            let e0 = point.eval_lagrange(&poly0);
-            let e1 = point.eval_coeffs(&poly1);
+            let e0 = point.eval_poly_in_evals(&poly0);
+            let e1 = point.eval_poly_in_coeffs(&poly1);
             assert_eq!(e0, e1);
 
             let mut poly2 = poly0.fix_var_ext(*point.last().unwrap());
@@ -368,8 +399,8 @@ mod test {
         let mut rng = &mut crate::test::rng(1);
         let k = 4usize;
 
-        let poly: Poly<F> = Poly::rand(&mut rng, k);
-        let poly_in_coeffs: Poly<F> = poly.clone().to_coeffs();
+        let poly: Poly<F, Eval> = Poly::rand(&mut rng, k);
+        let poly_in_coeffs = poly.clone().to_coeffs();
         let extend = 3;
         let rate = poly.k() + extend;
 
@@ -390,7 +421,7 @@ mod test {
             assert_eq!(ei, cw_i);
 
             let point = Point::<F>::expand(poly.k(), wi);
-            let u0 = poly.eval_lagrange(&point);
+            let u0 = poly.eval(&point);
             let u1 = poly_in_coeffs.eval_univariate::<F>(wi);
             assert_eq!(u0, u1);
         });
@@ -404,24 +435,24 @@ mod test {
         let k = 4usize;
 
         for _ in 0..1000 {
-            let poly_in_lagrange: Poly<F> = Poly::rand(&mut rng, k);
-            let poly_in_coeffs = poly_in_lagrange.clone().to_coeffs();
+            let poly_in_evals: Poly<F, Eval> = Poly::rand(&mut rng, k);
+            let poly_in_coeffs = poly_in_evals.clone().to_coeffs();
             let r: F = rng.random();
             let point = Point::<F>::expand(poly_in_coeffs.k(), r);
-            let e0 = poly_in_lagrange.eval_lagrange(&point);
-            let e1 = poly_in_coeffs.eval_coeffs(&point);
+            let e0 = poly_in_evals.eval(&point);
+            let e1 = poly_in_coeffs.eval(&point);
             assert_eq!(e0, e1);
             let e1 = poly_in_coeffs.eval_univariate(r);
             assert_eq!(e0, e1);
         }
 
         for _ in 0..1000 {
-            let poly_in_coeffs: Poly<F> = Poly::rand(&mut rng, k);
-            let poly_in_lagrange = poly_in_coeffs.clone().to_lagrange();
+            let poly_in_coeffs: Poly<F, Coeff> = Poly::rand(&mut rng, k);
+            let poly_in_evals = poly_in_coeffs.clone().to_evals();
             let r: F = rng.random();
-            let point = Point::<F>::expand(poly_in_lagrange.k(), r);
-            let e0 = poly_in_coeffs.eval_coeffs(&point);
-            let e1 = poly_in_lagrange.eval_lagrange(&point);
+            let point = Point::<F>::expand(poly_in_evals.k(), r);
+            let e0 = poly_in_coeffs.eval(&point);
+            let e1 = poly_in_evals.eval(&point);
             assert_eq!(e0, e1);
             let e1 = poly_in_coeffs.eval_univariate(r);
             assert_eq!(e0, e1);

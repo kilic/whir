@@ -8,10 +8,12 @@ use crate::{
         sumcheck::eq::{compress_eqs_base, compress_eqs_ext},
         Claim,
     },
-    poly::{Point, Poly},
+    poly::{Eval, Point},
     transcript::{Challenge, Reader, Writer},
     utils::VecOps,
 };
+
+type Poly<F> = crate::poly::Poly<F, Eval>;
 
 fn extrapolate<F: Field, EF: ExtensionField<F>>(evals: &[F], target: EF) -> EF {
     let points = (0..evals.len())
@@ -246,13 +248,13 @@ impl<F: Field, Ext: ExtensionField<F>> MultiRound<F, Ext> {
                 let off = poly.k();
                 assert_eq!(off, zs.len() - rs.len());
                 let (zs0, zs1) = zs.split_at(off);
-                eval_eq_xy(&zs1, rs) * poly.eval_lagrange(&zs0.as_ext::<Ext>())
+                eval_eq_xy(&zs1, rs) * poly.eval(&zs0.as_ext::<Ext>())
             })
             .chain(self.points_ext.iter().map(|zs| {
                 let off = poly.k();
                 assert_eq!(off, zs.len() - rs.len());
                 let (zs0, zs1) = zs.split_at(off);
-                eval_eq_xy(&zs1, rs) * poly.eval_lagrange(&zs0)
+                eval_eq_xy(&zs1, rs) * poly.eval(&zs0)
             }))
             .collect::<Vec<_>>();
         eqs.iter().horner_shifted(self.alpha, self.alpha)
@@ -390,7 +392,7 @@ mod test {
             let d = 5;
             let mut rng = crate::test::rng(1);
 
-            let poly: Poly<F> = Poly::rand(&mut rng, k);
+            let poly: super::Poly<F> = Poly::rand(&mut rng, k);
             let n_points = 1;
             let domain = "";
 
@@ -414,8 +416,8 @@ mod test {
                 {
                     let z = &claims[0].point;
                     let r = sc.rs().reversed();
-                    assert_eq!(poly.eval_lagrange(&r), sc.poly.constant().unwrap());
-                    assert_eq!(sc.sum(), alpha * eval_eq_xy(z, &r) * poly.eval_lagrange(&r));
+                    assert_eq!(poly.eval(&r), sc.poly.constant().unwrap());
+                    assert_eq!(sc.sum(), alpha * eval_eq_xy(z, &r) * poly.eval(&r));
                     assert_eq!(alpha * eval_eq_xy(z, &r), sc.eq.constant().unwrap());
                 }
 
@@ -457,7 +459,7 @@ mod test {
 
                     let k = ds.iter().sum::<usize>();
 
-                    let poly: Poly<F> = Poly::rand(&mut rng, k);
+                    let poly: super::Poly<F> = Poly::rand(&mut rng, k);
                     let (proof, checkpoint_prover) = {
                         let mut transcript = Writer::init("");
 
