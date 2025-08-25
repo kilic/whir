@@ -17,7 +17,7 @@ const RUST_CRYPTO_UPDATE: u8 = 1;
 // TODO: add buffer to hash less
 #[derive(Debug, Clone)]
 pub struct RustCryptoWriter<W: Write, D: Digest + FixedOutputReset> {
-    hasher: D,
+    challenger: D,
     writer: W,
 }
 
@@ -40,17 +40,17 @@ fn draw_ext_field<F: Field, Ext: ExtensionField<F>, D: Digest + FixedOutputReset
     .unwrap()
 }
 
-fn draw_bits<D: Digest + FixedOutputReset + Clone>(hasher: &mut D, bit_size: usize) -> usize {
+fn draw_bits<D: Digest + FixedOutputReset + Clone>(hasher: &mut D, bits: usize) -> usize {
     Digest::update(hasher, [RUST_CRYPTO_UPDATE]);
     let bytes = hasher.clone().finalize().to_vec();
     let ret = usize::from_le_bytes(bytes[0..usize::BITS as usize / 8].try_into().unwrap());
-    ret & ((1 << bit_size) - 1)
+    ret & ((1 << bits) - 1)
 }
 
 impl<W: Write + Default, D: Digest + FixedOutputReset + Clone> RustCryptoWriter<W, D> {
     pub fn init(prefix: impl AsRef<[u8]>) -> Self {
         RustCryptoWriter {
-            hasher: D::new_with_prefix(prefix),
+            challenger: D::new_with_prefix(prefix),
             writer: W::default(),
         }
     }
@@ -89,7 +89,7 @@ impl<W: Write, D: Digest + FixedOutputReset> Writer<[u8; 32]> for RustCryptoWrit
 impl<W: Write, D: Digest + FixedOutputReset> BytesWriter for RustCryptoWriter<W, D> {
     fn write(&mut self, bytes: &[u8]) -> Result<(), crate::Error> {
         <Self as BytesWriter>::write_hint(self, bytes)?;
-        Digest::update(&mut self.hasher, bytes);
+        Digest::update(&mut self.challenger, bytes);
         Ok(())
     }
 
@@ -100,23 +100,17 @@ impl<W: Write, D: Digest + FixedOutputReset> BytesWriter for RustCryptoWriter<W,
     }
 }
 
-impl<
-        W: Write + Default,
-        D: Digest + FixedOutputReset + Clone,
-        F: Field,
-        Ext: ExtensionField<F>,
-    > Challenge<F, Ext> for RustCryptoWriter<W, D>
+impl<W: Write, D: Digest + FixedOutputReset + Clone, F: Field, Ext: ExtensionField<F>>
+    Challenge<F, Ext> for RustCryptoWriter<W, D>
 {
     fn draw(&mut self) -> Ext {
-        draw_ext_field::<F, Ext, _>(&mut self.hasher)
+        draw_ext_field::<F, Ext, _>(&mut self.challenger)
     }
 }
 
-impl<W: Write + Default, D: Digest + FixedOutputReset + Clone> ChallengeBits
-    for RustCryptoWriter<W, D>
-{
-    fn draw(&mut self, bit_size: usize) -> usize {
-        draw_bits(&mut self.hasher, bit_size)
+impl<W: Write, D: Digest + FixedOutputReset + Clone> ChallengeBits for RustCryptoWriter<W, D> {
+    fn draw(&mut self, bits: usize) -> usize {
+        draw_bits(&mut self.challenger, bits)
     }
 }
 
@@ -188,116 +182,7 @@ impl<R: Read, D: Digest + FixedOutputReset + Clone, F: Field, Ext: ExtensionFiel
 impl<R: Read + Default, D: Digest + FixedOutputReset + Clone> ChallengeBits
     for RustCryptoReader<R, D>
 {
-    fn draw(&mut self, bit_size: usize) -> usize {
-        draw_bits(&mut self.hasher, bit_size)
-    }
-}
-
-#[cfg(test)]
-mod test {
-    #[cfg(test)]
-    use crate::field::SerializedField;
-    use crate::transcript::{Challenge, Reader, Writer};
-    #[cfg(test)]
-    use digest::{Digest, FixedOutputReset};
-    use p3_baby_bear::BabyBear;
-    use p3_field::extension::BinomialExtensionField;
-    #[cfg(test)]
-    use p3_field::{ExtensionField, Field};
-    use p3_goldilocks::Goldilocks;
-    use p3_koala_bear::KoalaBear;
-    use rand::Rng;
-
-    #[cfg(test)]
-    fn run_test<
-        F: Field + SerializedField,
-        Ext: ExtensionField<F> + SerializedField,
-        D: Digest + FixedOutputReset + Clone,
-    >(
-        seed: u64,
-    ) where
-        rand::distr::StandardUniform: rand::distr::Distribution<F>,
-        rand::distr::StandardUniform: rand::distr::Distribution<Ext>,
-    {
-        use crate::transcript::rust_crypto::{RustCryptoReader, RustCryptoWriter};
-
-        let mut w = RustCryptoWriter::<Vec<u8>, D>::init("");
-        let mut rng = crate::test::rng(seed + 1);
-        let mut rng_w = crate::test::rng(seed);
-
-        let mut els_w = vec![];
-        let mut els_ext_w = vec![];
-        let mut chs_w = vec![];
-        let mut bytes_w = vec![];
-        (0..10).for_each(|_| {
-            use crate::transcript::BytesWriter;
-
-            let n_draw = rng_w.random_range(0..10);
-            let n_write = rng_w.random_range(0..10);
-            let n_write_ext = rng_w.random_range(0..10);
-            let n_bytes = rng_w.random_range(0..128);
-
-            let chs: Vec<Ext> = w.draw_many(n_draw);
-            let els: Vec<F> = (0..n_write).map(|_| rng.random()).collect();
-            let els_ext: Vec<Ext> = (0..n_write_ext).map(|_| rng.random()).collect();
-            let bytes: Vec<u8> = (0..n_bytes).map(|_| rng.random()).collect();
-
-            w.write_many(&els).unwrap();
-            w.write_many(&els_ext).unwrap();
-            <RustCryptoWriter<_, D> as BytesWriter>::write(&mut w, &bytes).unwrap();
-
-            els_w.extend(els);
-            els_ext_w.extend(els_ext);
-            chs_w.extend(chs);
-            bytes_w.extend(bytes);
-        });
-
-        let data = w.finalize();
-        let mut r = RustCryptoReader::<&[u8], D>::init(&data, "");
-
-        let mut rng_r = crate::test::rng(seed);
-        let mut els_r = vec![];
-        let mut els_ext_r = vec![];
-        let mut chs_r = vec![];
-        let mut bytes_r = vec![];
-        (0..10).for_each(|_| {
-            use crate::transcript::BytesReader;
-
-            let n_draw = rng_r.random_range(0..10);
-            let n_read = rng_r.random_range(0..10);
-            let n_read_ext = rng_r.random_range(0..10);
-            let n_bytes = rng_r.random_range(0..128);
-
-            let chs: Vec<Ext> = r.draw_many(n_draw);
-            let els: Vec<F> = r.read_many(n_read).unwrap();
-            let els_ext: Vec<Ext> = r.read_many(n_read_ext).unwrap();
-            let bytes: Vec<u8> =
-                <RustCryptoReader<_, D> as BytesReader>::read(&mut r, n_bytes).unwrap();
-
-            els_r.extend(els);
-            els_ext_r.extend(els_ext);
-            chs_r.extend(chs);
-            bytes_r.extend(bytes);
-        });
-
-        let must_be_err: Result<F, crate::Error> = r.read();
-        assert!(must_be_err.is_err());
-
-        assert_eq!(els_w, els_r);
-        assert_eq!(els_ext_w, els_ext_r);
-        assert_eq!(chs_w, chs_r);
-        assert_eq!(bytes_w, bytes_r);
-    }
-
-    #[test]
-    fn test_transcript() {
-        for i in 0..100 {
-            run_test::<Goldilocks, Goldilocks, sha2::Sha256>(i);
-            run_test::<Goldilocks, BinomialExtensionField<Goldilocks, 2>, sha2::Sha256>(i);
-            run_test::<BabyBear, BabyBear, sha2::Sha256>(i);
-            run_test::<BabyBear, BinomialExtensionField<BabyBear, 4>, sha2::Sha256>(i);
-            run_test::<KoalaBear, KoalaBear, sha2::Sha256>(i);
-            run_test::<KoalaBear, BinomialExtensionField<KoalaBear, 4>, sha2::Sha256>(i);
-        }
+    fn draw(&mut self, bits: usize) -> usize {
+        draw_bits(&mut self.hasher, bits)
     }
 }

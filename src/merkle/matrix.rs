@@ -4,7 +4,7 @@ use crate::{
     utils::log2_strict,
     Error,
 };
-use p3_field::Field;
+use p3_field::{ExtensionField, Field};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
 use rayon::{iter::ParallelIterator, slice::ParallelSlice};
 use std::fmt::Debug;
@@ -27,13 +27,13 @@ impl<F: Field, Digest: Clone> MatrixCommitmentData<F, Digest> {
     }
 }
 
-pub trait MatrixCommitment<F: Field> {
+pub trait MatrixCommitment<F: Field, Ext: ExtensionField<F>> {
     type Digest: Copy + Debug;
     fn commit<Transcript>(
         &self,
         transcript: &mut Transcript,
-        data: RowMajorMatrix<F>,
-    ) -> Result<MatrixCommitmentData<F, Self::Digest>, Error>
+        data: RowMajorMatrix<Ext>,
+    ) -> Result<MatrixCommitmentData<Ext, Self::Digest>, Error>
     where
         Transcript: Writer<Self::Digest>;
 
@@ -41,11 +41,11 @@ pub trait MatrixCommitment<F: Field> {
         &self,
         transcript: &mut Transcript,
         index: usize,
-        comm: &MatrixCommitmentData<F, Self::Digest>,
-    ) -> Result<Vec<F>, Error>
+        comm: &MatrixCommitmentData<Ext, Self::Digest>,
+    ) -> Result<Vec<Ext>, Error>
     where
         F: Copy,
-        Transcript: Writer<F> + Writer<Self::Digest>;
+        Transcript: Writer<Ext> + Writer<Self::Digest>;
 
     fn verify<Transcript>(
         &self,
@@ -54,14 +54,14 @@ pub trait MatrixCommitment<F: Field> {
         index: usize,
         width: usize,
         k: usize,
-    ) -> Result<Vec<F>, Error>
+    ) -> Result<Vec<Ext>, Error>
     where
-        Transcript: Reader<F> + Reader<Self::Digest>;
+        Transcript: Reader<Ext> + Reader<Self::Digest>;
 }
 
-impl<F: Field, Digest, H, C> MatrixCommitment<F> for MerkleTree<F, Digest, H, C>
+impl<F: Field, Ext: ExtensionField<F>, Digest, H, C> MatrixCommitment<F, Ext>
+    for MerkleTree<F, Ext, Digest, H, C>
 where
-    F: Copy + Clone + Debug + Send + Sync,
     Digest: Copy + Clone + Debug + Send + Sync + Eq + PartialEq,
     H: Hasher<F, Digest>,
     C: Compress<Digest, 2>,
@@ -70,8 +70,8 @@ where
     fn commit<Transcript>(
         &self,
         transcript: &mut Transcript,
-        data: RowMajorMatrix<F>,
-    ) -> Result<MatrixCommitmentData<F, Self::Digest>, Error>
+        data: RowMajorMatrix<Ext>,
+    ) -> Result<MatrixCommitmentData<Ext, Self::Digest>, Error>
     where
         Transcript: Writer<Self::Digest>,
     {
@@ -79,10 +79,15 @@ where
         let layer0 = l
             .par_row_slices()
             .zip(r.par_row_slices())
-            .flat_map(|(l, r)| [self.h.hash_iter(l), self.h.hash_iter(r)])
+            .flat_map(|(l, r)| {
+                let l = l.iter().flat_map(|e| e.as_basis_coefficients_slice());
+                let r = r.iter().flat_map(|e| e.as_basis_coefficients_slice());
+                [self.h.hash_iter(l), self.h.hash_iter(r)]
+            })
             .collect::<Vec<_>>();
 
         let mut layers = vec![layer0];
+
         for _ in 0..log2_strict(data.height()) {
             let next_layer = layers
                 .last()
@@ -96,6 +101,7 @@ where
         let top = layers.last().unwrap();
         debug_assert_eq!(top.len(), 1);
         transcript.write(top[0])?;
+
         Ok(MatrixCommitmentData { data, layers })
     }
 
@@ -103,10 +109,10 @@ where
         &self,
         transcript: &mut Transcript,
         index: usize,
-        comm: &MatrixCommitmentData<F, Self::Digest>,
-    ) -> Result<Vec<F>, Error>
+        comm: &MatrixCommitmentData<Ext, Self::Digest>,
+    ) -> Result<Vec<Ext>, Error>
     where
-        Transcript: Writer<F> + Writer<Digest>,
+        Transcript: Writer<Ext> + Writer<Digest>,
     {
         let k = comm.k();
         let leaf = comm
@@ -136,7 +142,10 @@ where
                 let node = layer[index_asc ^ 1];
                 #[cfg(debug_assertions)]
                 if _i == 0 {
-                    assert_eq!(self.h.hash_iter(&_sibling), node);
+                    let sibling = _sibling
+                        .iter()
+                        .flat_map(|e| e.as_basis_coefficients_slice());
+                    assert_eq!(self.h.hash_iter(sibling), node);
                 }
                 witness.push(node);
                 index_asc >>= 1;
@@ -145,7 +154,8 @@ where
 
         #[cfg(debug_assertions)]
         {
-            let leaf = self.h.hash_iter(&leaf);
+            let leaf = leaf.iter().flat_map(|e| e.as_basis_coefficients_slice());
+            let leaf = self.h.hash_iter(leaf);
             verify_merkle_proof(&self.c, comm.root(), index, leaf, &witness).unwrap();
         }
 
@@ -159,12 +169,14 @@ where
         index: usize,
         width: usize,
         k: usize,
-    ) -> Result<Vec<F>, Error>
+    ) -> Result<Vec<Ext>, Error>
     where
-        Transcript: Reader<F> + Reader<Digest>,
+        Transcript: Reader<Ext> + Reader<Digest>,
     {
-        let row: Vec<F> = transcript.read_hint_many(width)?;
-        let leaf = self.h.hash_iter(&row);
+        let row: Vec<Ext> = transcript.read_hint_many(width)?;
+        let leaf = self
+            .h
+            .hash_iter(row.iter().flat_map(|e| e.as_basis_coefficients_slice()));
         let index = to_interleaved_index(k, index);
         let witness: Vec<Digest> = transcript.read_hint_many(k)?;
         verify_merkle_proof(&self.c, comm, index, leaf, &witness)?;
@@ -175,13 +187,14 @@ where
 #[cfg(test)]
 mod test {
     use crate::{
-        merkle::{matrix::MatrixCommitment, MerkleTree, RustCrypto},
+        merkle::{matrix::MatrixCommitment, MerkleTree, RustCryptoCompress, RustCryptoHasher},
         transcript::{
             rust_crypto::{RustCryptoReader, RustCryptoWriter},
             Reader,
         },
         utils::n_rand,
     };
+    use p3_field::extension::BinomialExtensionField;
     use p3_goldilocks::Goldilocks;
     use p3_matrix::dense::RowMajorMatrix;
 
@@ -190,32 +203,67 @@ mod test {
         type F = Goldilocks;
         type Writer = RustCryptoWriter<Vec<u8>, sha3::Keccak256>;
         type Reader<'a> = RustCryptoReader<&'a [u8], sha3::Keccak256>;
-        type Hasher = RustCrypto<sha3::Keccak256>;
-        type Compress = RustCrypto<sha3::Keccak256>;
+        type Hasher = RustCryptoHasher<sha3::Keccak256>;
+        type Compress = RustCryptoCompress<sha3::Keccak256>;
         let hasher = Hasher::default();
         let compress = Compress::default();
 
-        let mat_comm = MerkleTree::<F, [u8; 32], _, _>::new(hasher, compress);
-        let mut transcript = Writer::init("test");
+        let mat_comm = MerkleTree::<F, F, [u8; 32], _, _>::new(hasher, compress);
+        for width in 1..5 {
+            let mut transcript = Writer::init("test");
+            let k = 5;
+            let mut rng = crate::test::rng(1);
+            let coeffs = n_rand(&mut rng, (1 << k) * width);
+            let data = RowMajorMatrix::new(coeffs, width);
+            let comm_data = mat_comm.commit(&mut transcript, data).unwrap();
+            (0..1 << k).for_each(|index| {
+                mat_comm.query(&mut transcript, index, &comm_data).unwrap();
+            });
 
-        let k = 3;
-        let width = 1;
-        let mut rng = crate::test::rng(1);
-        let coeffs = n_rand(&mut rng, 1 << k);
-        let data = RowMajorMatrix::new(coeffs, width);
-        let comm_data = mat_comm.commit(&mut transcript, data).unwrap();
-        (0..1 << k).for_each(|index| {
-            mat_comm.query(&mut transcript, index, &comm_data).unwrap();
-        });
+            let proof = transcript.finalize();
+            let mut transcript = Reader::init(&proof, "test");
+            let comm: [u8; 32] = transcript.read().unwrap();
 
-        let proof = transcript.finalize();
-        let mut transcript = Reader::init(&proof, "test");
-        let comm: [u8; 32] = transcript.read().unwrap();
+            (0..1 << k).for_each(|index| {
+                mat_comm
+                    .verify(&mut transcript, comm, index, width, k)
+                    .unwrap();
+            });
+        }
+    }
 
-        (0..1 << k).for_each(|index| {
-            mat_comm
-                .verify(&mut transcript, comm, index, width, k)
-                .unwrap();
-        });
+    #[test]
+    fn test_mat_com_ext() {
+        type F = Goldilocks;
+        type Ext = BinomialExtensionField<F, 2>;
+        type Writer = RustCryptoWriter<Vec<u8>, sha3::Keccak256>;
+        type Reader<'a> = RustCryptoReader<&'a [u8], sha3::Keccak256>;
+        type Hasher = RustCryptoHasher<sha3::Keccak256>;
+        type Compress = RustCryptoCompress<sha3::Keccak256>;
+        let hasher = Hasher::default();
+        let compress = Compress::default();
+
+        let mat_comm = MerkleTree::<F, Ext, [u8; 32], _, _>::new(hasher, compress);
+        for width in 1..5 {
+            let mut transcript = Writer::init("test");
+            let k = 5;
+            let mut rng = crate::test::rng(1);
+            let coeffs = n_rand(&mut rng, (1 << k) * width);
+            let data = RowMajorMatrix::new(coeffs, width);
+            let comm_data = mat_comm.commit(&mut transcript, data).unwrap();
+            (0..1 << k).for_each(|index| {
+                mat_comm.query(&mut transcript, index, &comm_data).unwrap();
+            });
+
+            let proof = transcript.finalize();
+            let mut transcript = Reader::init(&proof, "test");
+            let comm: [u8; 32] = transcript.read().unwrap();
+
+            (0..1 << k).for_each(|index| {
+                mat_comm
+                    .verify(&mut transcript, comm, index, width, k)
+                    .unwrap();
+            });
+        }
     }
 }

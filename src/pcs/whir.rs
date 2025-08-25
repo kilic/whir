@@ -20,7 +20,7 @@ pub fn commit<
     Transcript,
     F: TwoAdicField,
     Ext: ExtensionField<F> + TwoAdicField,
-    MCom: MatrixCommitment<Ext>,
+    MCom: MatrixCommitment<F, Ext>,
     DFT: TwoAdicSubgroupDft<Ext>,
 >(
     transcript: &mut Transcript,
@@ -43,14 +43,14 @@ where
 
 fn stir_indicies<Transcript>(
     transcript: &mut Transcript,
-    bit_size: usize,
+    bits: usize,
     n_queries: usize,
 ) -> Vec<usize>
 where
     Transcript: ChallengeBits,
 {
     (0..n_queries)
-        .map(|_| ChallengeBits::draw(transcript, bit_size))
+        .map(|_| ChallengeBits::draw(transcript, bits))
         .sorted()
         .dedup()
         .collect::<Vec<_>>()
@@ -59,8 +59,8 @@ where
 pub struct Whir<
     F: TwoAdicField,
     Ext: ExtensionField<F>,
-    MCom: MatrixCommitment<F>,
-    MComExt: MatrixCommitment<Ext>,
+    MCom: MatrixCommitment<F, F>,
+    MComExt: MatrixCommitment<F, Ext>,
 > {
     pub k: usize,
     pub folding: usize,
@@ -75,8 +75,8 @@ pub struct Whir<
 impl<
         F: TwoAdicField,
         Ext: ExtensionField<F> + TwoAdicField,
-        MCom: MatrixCommitment<F>,
-        MComExt: MatrixCommitment<Ext>,
+        MCom: MatrixCommitment<F, F>,
+        MComExt: MatrixCommitment<F, Ext>,
     > Whir<F, Ext, MCom, MComExt>
 {
     pub fn new(
@@ -173,7 +173,7 @@ impl<
         let width = 1 << self.folding;
         let rate_step = self.folding - 1;
 
-        let mut round_data = None;
+        let mut round_data: Option<MatrixCommitmentData<Ext, _>> = None;
         let mut round_point: Option<Point<Ext>> = None;
 
         // run folding rounds
@@ -189,7 +189,7 @@ impl<
             let poly_in_coeffs = sumcheck.poly().clone().to_coeffs();
 
             // commit to the polynomial in coefficient representation
-            let _round_data = {
+            let _round_data: MatrixCommitmentData<Ext, _> = {
                 // rearrange coefficients since variables are fixed in backwards order
                 let mut transposed = unsafe_allocate_zero_vec(poly_in_coeffs.len());
                 let height = poly_in_coeffs.len() / width;

@@ -37,14 +37,19 @@ impl<F: Field, Ext: ExtensionField<F>> Claim<F, Ext> {
 mod test {
     use crate::{
         field::SerializedField,
-        merkle::{MerkleTree, RustCrypto},
+        merkle::{
+            MerkleTree, PoseidonCompress, PoseidonHasher, RustCryptoCompress, RustCryptoHasher,
+        },
         pcs::{params::SecurityAssumption, whir::Whir, Claim},
         poly::{Coeff, Eval, Point, Poly},
         transcript::{
+            poseidon::{PoseidonReader, PoseidonWriter},
             rust_crypto::{RustCryptoReader, RustCryptoWriter},
             Challenge, Reader, Writer,
         },
     };
+    use p3_baby_bear::Poseidon2BabyBear;
+    use p3_challenger::DuplexChallenger;
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
     use p3_field::{extension::BinomialExtensionField, ExtensionField, Field, TwoAdicField};
     use p3_matrix::{dense::RowMajorMatrix, Matrix};
@@ -197,7 +202,7 @@ mod test {
         }
     }
 
-    fn run_whir<
+    fn run_whir_rust_crypto<
         F: TwoAdicField + Ord + SerializedField,
         Ext: ExtensionField<F> + TwoAdicField + Ord + SerializedField,
     >(
@@ -213,14 +218,14 @@ mod test {
         type Writer = RustCryptoWriter<Vec<u8>, sha3::Keccak256>;
         type Reader<'a> = RustCryptoReader<&'a [u8], sha3::Keccak256>;
 
-        type Hasher = RustCrypto<sha3::Keccak256>;
-        type Compress = RustCrypto<sha3::Keccak256>;
+        type Hasher = RustCryptoHasher<sha3::Keccak256>;
+        type Compress = RustCryptoCompress<sha3::Keccak256>;
 
         let hasher = Hasher::default();
         let compress = Compress::default();
 
-        let comm = MerkleTree::<F, [u8; 32], _, _>::new(hasher.clone(), compress.clone());
-        let comm_ext = MerkleTree::<Ext, [u8; 32], _, _>::new(hasher, compress);
+        let comm = MerkleTree::<F, F, [u8; 32], _, _>::new(hasher.clone(), compress.clone());
+        let comm_ext = MerkleTree::<F, Ext, [u8; 32], _, _>::new(hasher, compress);
 
         let whir = Whir::new(k, folding, rate, soundness, security_level, comm, comm_ext);
 
@@ -234,9 +239,8 @@ mod test {
                 .commit::<_, Radix2DitParallel<F>>(&mut transcript, &poly_in_coeffs)
                 .unwrap();
 
-            let claims =
-                make_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly_in_evals)
-                    .unwrap();
+            let claims: Vec<Claim<Ext, Ext>> =
+                make_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly_in_evals).unwrap();
             whir.open::<_, Radix2DitParallel<Ext>>(&mut transcript, claims, data, poly_in_coeffs)
                 .unwrap();
 
@@ -257,7 +261,7 @@ mod test {
     }
 
     #[test]
-    fn test_whir() {
+    fn test_whir_rust_crypto() {
         type F = p3_goldilocks::Goldilocks;
         type Ext = BinomialExtensionField<F, 2>;
 
@@ -271,7 +275,84 @@ mod test {
             for k in 4..=10 {
                 for folding in 1..=3 {
                     for n_points in 1..=4 {
-                        run_whir::<F, Ext>(k, folding, 1, soundness, 32, n_points);
+                        run_whir_rust_crypto::<F, Ext>(k, folding, 1, soundness, 32, n_points);
+                    }
+                }
+            }
+        }
+    }
+
+    fn run_whir_poseidon(
+        k: usize,
+        folding: usize,
+        rate: usize,
+        soundness: SecurityAssumption,
+        security_level: usize,
+        n_points: usize,
+    ) {
+        type F = p3_baby_bear::BabyBear;
+        type Ext = BinomialExtensionField<F, 4>;
+        type Perm = Poseidon2BabyBear<16>;
+        type Hasher = PoseidonHasher<F, Perm, 16, 8, 8>;
+        type Compress = PoseidonCompress<F, Perm, 2, 8, 16>;
+        type Digest = [F; 8];
+        type Challenger = DuplexChallenger<F, Perm, 16, 8>;
+        type Writer = PoseidonWriter<Vec<u8>, F, Challenger>;
+        type Reader<'a> = PoseidonReader<&'a [u8], F, Challenger>;
+
+        let perm = Perm::new_from_rng_128(&mut crate::test::rng(1000));
+        let hasher = Hasher::new(perm.clone());
+        let compress = Compress::new(perm.clone());
+        let challenger = Challenger::new(perm.clone());
+
+        let comm = MerkleTree::<F, F, Digest, _, _>::new(hasher.clone(), compress.clone());
+        let comm_ext = MerkleTree::<F, Ext, Digest, _, _>::new(hasher, compress);
+        let whir = Whir::new(k, folding, rate, soundness, security_level, comm, comm_ext);
+
+        let mut rng = &mut crate::test::rng(1);
+        let (proof, checkpoint_prover) = {
+            let poly_in_coeffs: Poly<F, Coeff> = Poly::rand(&mut rng, k);
+            let poly_in_evals = poly_in_coeffs.clone().to_evals();
+
+            let mut transcript = Writer::init(challenger);
+            let data = whir
+                .commit::<_, Radix2DitParallel<F>>(&mut transcript, &poly_in_coeffs)
+                .unwrap();
+
+            let claims =
+                make_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly_in_evals).unwrap();
+
+            whir.open::<_, Radix2DitParallel<Ext>>(&mut transcript, claims, data, poly_in_coeffs)
+                .unwrap();
+
+            let checkpoint: F = transcript.draw();
+            (transcript.finalize(), checkpoint)
+        };
+
+        let checkpoint_verifier = {
+            let challenger = Challenger::new(perm.clone());
+            let mut transcript = Reader::init(&proof, challenger);
+            let comm: Digest = transcript.read().unwrap();
+            let claims = get_claims_ext::<_, F, Ext>(&mut transcript, whir.k, n_points).unwrap();
+            whir.verify(&mut transcript, claims, comm).unwrap();
+            let checkpoint: F = transcript.draw();
+            checkpoint
+        };
+        assert_eq!(checkpoint_prover, checkpoint_verifier);
+    }
+
+    #[test]
+    fn test_whir_poseidon() {
+        let soundness_type = [
+            SecurityAssumption::JohnsonBound,
+            SecurityAssumption::CapacityBound,
+            SecurityAssumption::UniqueDecoding,
+        ];
+        for soundness in soundness_type {
+            for k in 4..=10 {
+                for folding in 1..=3 {
+                    for n_points in 1..=4 {
+                        run_whir_poseidon(k, folding, 1, soundness, 32, n_points);
                     }
                 }
             }

@@ -15,11 +15,13 @@ sha2 = "0.10.8"
 sha3 = "0.10.8"
 
 p3-baby-bear = {git = "https://github.com/plonky3/plonky3.git"}
+p3-challenger = {git = "https://github.com/Plonky3/Plonky3.git"}
 p3-dft = {git = "https://github.com/Plonky3/Plonky3.git"}
 p3-field = {git = "https://github.com/plonky3/plonky3.git"}
 p3-goldilocks = {git = "https://github.com/plonky3/plonky3.git"}
 p3-koala-bear = {git = "https://github.com/Plonky3/Plonky3.git"}
 p3-matrix = {git = "https://github.com/Plonky3/Plonky3.git"}
+p3-symmetric = {git = "https://github.com/Plonky3/Plonky3.git"}
 
 tracing = "0.1.37"
 tracing-forest = {version = "0.1.6", features = ["ansi", "smallvec"]}
