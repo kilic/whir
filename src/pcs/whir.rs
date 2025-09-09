@@ -103,6 +103,7 @@ impl<
         MComExt: Commitment<F>,
     > Whir<F, Ext, MCom, MComExt>
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         k: usize,
         folding: usize,
