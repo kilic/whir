@@ -212,6 +212,7 @@ mod test {
         k: usize,
         folding: usize,
         rate: usize,
+        initial_reduction: usize,
         soundness: SecurityAssumption,
         security_level: usize,
         n_points: usize,
@@ -230,7 +231,16 @@ mod test {
         let comm = MerkleTree::<F, [u8; 32], _, _>::new(hasher.clone(), compress.clone());
         let comm_ext = MerkleTree::<F, [u8; 32], _, _>::new(hasher, compress);
 
-        let whir = Whir::new(k, folding, rate, soundness, security_level, comm, comm_ext);
+        let whir = Whir::new(
+            k,
+            folding,
+            rate,
+            initial_reduction,
+            soundness,
+            security_level,
+            comm,
+            comm_ext,
+        );
 
         let mut rng = &mut crate::test::rng(1);
         let (proof, checkpoint_prover) = {
@@ -275,8 +285,18 @@ mod test {
         for soundness in soundness_type {
             for k in 4..=15 {
                 for folding in 1..=3 {
-                    for n_points in 1..=4 {
-                        run_whir_rust_crypto::<F, Ext>(k, folding, 1, soundness, 32, n_points);
+                    for initial_reduction in 1..=folding {
+                        for n_points in 1..=4 {
+                            run_whir_rust_crypto::<F, Ext>(
+                                k,
+                                folding,
+                                1,
+                                initial_reduction,
+                                soundness,
+                                32,
+                                n_points,
+                            );
+                        }
                     }
                 }
             }
@@ -287,6 +307,7 @@ mod test {
         k: usize,
         folding: usize,
         rate: usize,
+        initial_reduction: usize,
         soundness: SecurityAssumption,
         security_level: usize,
         n_points: usize,
@@ -312,7 +333,16 @@ mod test {
 
         let comm = MerkleTree::<F, Digest, _, _>::new(hasher.clone(), compress.clone());
         let comm_ext = MerkleTree::<F, Digest, _, _>::new(hasher, compress);
-        let whir = Whir::new(k, folding, rate, soundness, security_level, comm, comm_ext);
+        let whir = Whir::new(
+            k,
+            folding,
+            rate,
+            initial_reduction,
+            soundness,
+            security_level,
+            comm,
+            comm_ext,
+        );
 
         let mut rng = &mut crate::test::rng(1);
         let (proof, checkpoint_prover) = {
@@ -357,8 +387,18 @@ mod test {
         for soundness in soundness_type {
             for k in 4..=12 {
                 for folding in 1..=3 {
-                    for n_points in 1..=4 {
-                        run_whir_poseidon(k, folding, 1, soundness, 32, n_points);
+                    for initial_reduction in 1..=folding {
+                        for n_points in 1..=4 {
+                            run_whir_poseidon(
+                                k,
+                                folding,
+                                1,
+                                initial_reduction,
+                                soundness,
+                                32,
+                                n_points,
+                            );
+                        }
                     }
                 }
             }
@@ -367,9 +407,8 @@ mod test {
 
     #[test]
     #[ignore]
-    // TODO: move to actual bench env
     fn whir_bench() {
         crate::test::init_tracing();
-        run_whir_poseidon(25, 5, 1, SecurityAssumption::CapacityBound, 90, 1);
+        run_whir_poseidon(25, 5, 1, 3, SecurityAssumption::CapacityBound, 90, 1);
     }
 }
