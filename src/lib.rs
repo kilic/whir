@@ -13,7 +13,7 @@ pub enum Error {
 }
 
 #[cfg(test)]
-pub(crate) mod test {
+pub mod test {
     use rand::{rngs::StdRng, SeedableRng};
 
     #[allow(dead_code)]

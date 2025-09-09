@@ -32,6 +32,7 @@ fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &[F], y: &[Ext]) -> Ext {
         .product()
 }
 
+#[tracing::instrument(skip_all, fields(k = poly.k()))]
 fn round<
     Transcript,
     F: Field,

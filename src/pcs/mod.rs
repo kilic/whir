@@ -38,7 +38,9 @@ mod test {
     use crate::{
         field::SerializedField,
         merkle::{
-            MerkleTree, PoseidonCompress, PoseidonHasher, RustCryptoCompress, RustCryptoHasher,
+            poseidon::{PoseidonCompress, PoseidonHasher},
+            rust_crypto::{RustCryptoCompress, RustCryptoHasher},
+            MerkleTree,
         },
         pcs::{params::SecurityAssumption, whir::Whir, Claim},
         poly::{Coeff, Eval, Point, Poly},
@@ -48,11 +50,12 @@ mod test {
             Challenge, Reader, Writer,
         },
     };
-    use p3_baby_bear::Poseidon2BabyBear;
     use p3_challenger::DuplexChallenger;
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
     use p3_field::{extension::BinomialExtensionField, ExtensionField, Field, TwoAdicField};
+    use p3_koala_bear::Poseidon2KoalaBear;
     use p3_matrix::{dense::RowMajorMatrix, Matrix};
+    use p3_symmetric::PaddingFreeSponge;
     use rand::{
         distr::{Distribution, StandardUniform},
         Rng,
@@ -224,8 +227,8 @@ mod test {
         let hasher = Hasher::default();
         let compress = Compress::default();
 
-        let comm = MerkleTree::<F, F, [u8; 32], _, _>::new(hasher.clone(), compress.clone());
-        let comm_ext = MerkleTree::<F, Ext, [u8; 32], _, _>::new(hasher, compress);
+        let comm = MerkleTree::<F, [u8; 32], _, _>::new(hasher.clone(), compress.clone());
+        let comm_ext = MerkleTree::<F, [u8; 32], _, _>::new(hasher, compress);
 
         let whir = Whir::new(k, folding, rate, soundness, security_level, comm, comm_ext);
 
@@ -235,13 +238,11 @@ mod test {
             let poly_in_evals = poly_in_coeffs.clone().to_evals();
 
             let mut transcript = Writer::init("test");
-            let data = whir
-                .commit::<_, Radix2DitParallel<F>>(&mut transcript, &poly_in_coeffs)
-                .unwrap();
+            let data = whir.commit(&mut transcript, &poly_in_coeffs).unwrap();
 
             let claims: Vec<Claim<Ext, Ext>> =
                 make_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly_in_evals).unwrap();
-            whir.open::<_, Radix2DitParallel<Ext>>(&mut transcript, claims, data, poly_in_coeffs)
+            whir.open(&mut transcript, claims, data, poly_in_coeffs)
                 .unwrap();
 
             let checkpoint: F = transcript.draw();
@@ -272,7 +273,7 @@ mod test {
         ];
 
         for soundness in soundness_type {
-            for k in 4..=10 {
+            for k in 4..=15 {
                 for folding in 1..=3 {
                     for n_points in 1..=4 {
                         run_whir_rust_crypto::<F, Ext>(k, folding, 1, soundness, 32, n_points);
@@ -290,23 +291,27 @@ mod test {
         security_level: usize,
         n_points: usize,
     ) {
-        type F = p3_baby_bear::BabyBear;
+        type F = p3_koala_bear::KoalaBear;
         type Ext = BinomialExtensionField<F, 4>;
-        type Perm = Poseidon2BabyBear<16>;
-        type Hasher = PoseidonHasher<F, Perm, 16, 8, 8>;
-        type Compress = PoseidonCompress<F, Perm, 2, 8, 16>;
+        type Poseidon16 = Poseidon2KoalaBear<16>;
+        type Poseidon24 = Poseidon2KoalaBear<24>;
+
+        type Compress = PoseidonCompress<F, Poseidon16, 2, 8, 16>;
         type Digest = [F; 8];
-        type Challenger = DuplexChallenger<F, Perm, 16, 8>;
+        type Challenger = DuplexChallenger<F, Poseidon16, 16, 8>;
         type Writer = PoseidonWriter<Vec<u8>, F, Challenger>;
         type Reader<'a> = PoseidonReader<&'a [u8], F, Challenger>;
 
-        let perm = Perm::new_from_rng_128(&mut crate::test::rng(1000));
-        let hasher = Hasher::new(perm.clone());
-        let compress = Compress::new(perm.clone());
-        let challenger = Challenger::new(perm.clone());
+        let perm16 = Poseidon16::new_from_rng_128(&mut crate::test::rng(1000));
+        let perm24 = Poseidon24::new_from_rng_128(&mut crate::test::rng(1000));
+        let hasher: PaddingFreeSponge<_, 24, 16, 8> = PaddingFreeSponge::new(perm24);
 
-        let comm = MerkleTree::<F, F, Digest, _, _>::new(hasher.clone(), compress.clone());
-        let comm_ext = MerkleTree::<F, Ext, Digest, _, _>::new(hasher, compress);
+        let hasher = PoseidonHasher::<F, _, 8>::new(hasher);
+        let compress = Compress::new(perm16.clone());
+        let challenger = Challenger::new(perm16.clone());
+
+        let comm = MerkleTree::<F, Digest, _, _>::new(hasher.clone(), compress.clone());
+        let comm_ext = MerkleTree::<F, Digest, _, _>::new(hasher, compress);
         let whir = Whir::new(k, folding, rate, soundness, security_level, comm, comm_ext);
 
         let mut rng = &mut crate::test::rng(1);
@@ -315,22 +320,23 @@ mod test {
             let poly_in_evals = poly_in_coeffs.clone().to_evals();
 
             let mut transcript = Writer::init(challenger);
-            let data = whir
-                .commit::<_, Radix2DitParallel<F>>(&mut transcript, &poly_in_coeffs)
-                .unwrap();
+            let data = tracing::info_span!("commit")
+                .in_scope(|| whir.commit(&mut transcript, &poly_in_coeffs).unwrap());
 
             let claims =
                 make_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly_in_evals).unwrap();
 
-            whir.open::<_, Radix2DitParallel<Ext>>(&mut transcript, claims, data, poly_in_coeffs)
-                .unwrap();
+            tracing::info_span!("open").in_scope(|| {
+                whir.open(&mut transcript, claims, data, poly_in_coeffs)
+                    .unwrap();
+            });
 
             let checkpoint: F = transcript.draw();
             (transcript.finalize(), checkpoint)
         };
 
         let checkpoint_verifier = {
-            let challenger = Challenger::new(perm.clone());
+            let challenger = Challenger::new(perm16.clone());
             let mut transcript = Reader::init(&proof, challenger);
             let comm: Digest = transcript.read().unwrap();
             let claims = get_claims_ext::<_, F, Ext>(&mut transcript, whir.k, n_points).unwrap();
@@ -349,7 +355,7 @@ mod test {
             SecurityAssumption::UniqueDecoding,
         ];
         for soundness in soundness_type {
-            for k in 4..=10 {
+            for k in 4..=12 {
                 for folding in 1..=3 {
                     for n_points in 1..=4 {
                         run_whir_poseidon(k, folding, 1, soundness, 32, n_points);
@@ -357,5 +363,13 @@ mod test {
                 }
             }
         }
+    }
+
+    #[test]
+    #[ignore]
+    // TODO: move to actual bench env
+    fn whir_bench() {
+        crate::test::init_tracing();
+        run_whir_poseidon(25, 5, 1, SecurityAssumption::CapacityBound, 90, 1);
     }
 }
