@@ -1,14 +1,16 @@
+use crate::poly::Point;
+use crate::utils::TwoAdicSlice;
 use p3_field::{ExtensionField, Field};
 use rayon::prelude::*;
 
-use crate::poly::Point;
-
+#[tracing::instrument(skip_all, fields(points = points.len(), k = out.0.k()))]
 pub(super) fn compress_eqs_ext<F: Field>(
     out: (&mut [F], bool),
     points: &[Point<F>],
     alpha: F,
     shift: F,
 ) {
+    // TODO: explore SIMD for eq building
     if points.is_empty() {
         return;
     }
@@ -51,24 +53,24 @@ pub(super) fn compress_eqs_ext<F: Field>(
     // accumulate rows, add if initialized, assign otherwises
     let initialized = out.1;
     if initialized {
-        // initilized
         eq.par_chunks(n)
             .zip(out.0.par_iter_mut())
             .for_each(|(row, eq)| *eq += row.iter().fold(F::ZERO, |acc, &v| acc + v));
     } else {
-        // not initilized
         eq.par_chunks(n)
             .zip(out.0.par_iter_mut())
             .for_each(|(row, eq)| *eq = row.iter().fold(F::ZERO, |acc, &v| acc + v));
     }
 }
 
+#[tracing::instrument(skip_all, fields(points = points.len(), k = out.0.k()))]
 pub(super) fn compress_eqs_base<F: Field, Ext: ExtensionField<F>>(
     out: (&mut [Ext], bool),
     points: &[Point<F>],
     alpha: Ext,
     shift: Ext,
 ) {
+    // TODO: explore SIMD for eq building
     if points.is_empty() {
         return;
     }
