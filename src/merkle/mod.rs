@@ -1,240 +1,419 @@
-use crate::Error;
-use p3_field::{ExtensionField, Field};
-use p3_matrix::{
-    dense::{DenseMatrix, RowMajorMatrix},
-    extension::FlatMatrixView,
-};
-use rayon::iter::ParallelIterator;
 use std::fmt::Debug;
 
-pub mod comm;
+use crate::transcript::{Reader, Writer};
+use p3_field::{ExtensionField, Field};
+use p3_matrix::dense::RowMajorMatrix;
+
 pub mod poseidon;
+pub mod poseidon_packed;
 pub mod rust_crypto;
 
-pub trait Compress<T, const N: usize>: Sync {
-    fn apply(&self, input: [T; N]) -> T;
+pub trait MerkleData: Debug {
+    type Digest: Copy + Clone + Debug + Send + Sync + Eq + PartialEq;
+    fn commitment(&self) -> Self::Digest;
+    fn k(&self) -> usize;
 }
 
-pub trait Hasher<F: Field, Out>: Sync {
-    fn hash_base_data(&self, data: &RowMajorMatrix<F>) -> Vec<Out>;
-    fn hash_ext_data<Ext: ExtensionField<F>>(
+pub trait MerkleTree<F: Field> {
+    type MerkleData: MerkleData;
+
+    fn commit<Transcript>(
         &self,
-        data: &FlatMatrixView<F, Ext, DenseMatrix<Ext>>,
-    ) -> Vec<Out>;
-    fn hash_base_iter<I>(&self, row: I) -> Out
+        transcript: &mut Transcript,
+        data: RowMajorMatrix<F>,
+    ) -> Result<Self::MerkleData, crate::Error>
     where
-        I: IntoIterator<Item = F>;
-    fn hash_ext_iter<I, Ext: ExtensionField<F>>(&self, row: I) -> Out
+        Transcript: Writer<<Self::MerkleData as MerkleData>::Digest>;
+
+    fn query<Transcript>(
+        &self,
+        transcript: &mut Transcript,
+        index: usize,
+        data: &Self::MerkleData,
+    ) -> Result<Vec<F>, crate::Error>
     where
-        I: IntoIterator<Item = Ext>;
+        Transcript: Writer<F> + Writer<<Self::MerkleData as MerkleData>::Digest>;
+
+    fn verify<Transcript>(
+        &self,
+        transcript: &mut Transcript,
+        comm: <Self::MerkleData as MerkleData>::Digest,
+        index: usize,
+        width: usize,
+        k: usize,
+    ) -> Result<Vec<F>, crate::Error>
+    where
+        Transcript: Reader<F> + Reader<<Self::MerkleData as MerkleData>::Digest>;
 }
 
-pub(super) fn hash_reference_base<F: Field, Out: Send + Sync, H: Hasher<F, Out> + Sync>(
-    data: &RowMajorMatrix<F>,
-    hasher: &H,
-) -> Vec<Out> {
-    data.par_row_slices()
-        .map(|els| hasher.hash_base_iter(els.to_vec()))
-        .collect::<Vec<_>>()
-}
+pub trait MerkleTreeExt<F: Field, Ext: ExtensionField<F>> {
+    type MerkleData: MerkleData;
 
-pub(super) fn hash_reference_ext<
-    F: Field,
-    Ext: ExtensionField<F>,
-    Out: Send + Sync,
-    H: Hasher<F, Out> + Sync,
->(
-    data: &RowMajorMatrix<Ext>,
-    hasher: &H,
-) -> Vec<Out> {
-    data.par_row_slices()
-        .map(|ext| {
-            let els = Ext::flatten_to_base(ext.to_vec());
-            hasher.hash_base_iter(els)
-        })
-        .collect::<Vec<_>>()
-}
+    fn commit<Transcript>(
+        &self,
+        transcript: &mut Transcript,
+        data: RowMajorMatrix<Ext>,
+    ) -> Result<Self::MerkleData, crate::Error>
+    where
+        Transcript: Writer<<Self::MerkleData as MerkleData>::Digest>;
 
-pub fn verify_merkle_proof<C, Node>(
-    c: &C,
-    claim: Node,
-    mut index: usize,
-    leaf: Node,
-    witness: &[Node],
-) -> Result<(), Error>
-where
-    C: Compress<Node, 2>,
-    Node: Copy + Clone + Sync + Debug + Eq + PartialEq,
-{
-    assert!(index < 1 << witness.len());
-    let found = witness.iter().fold(leaf, |acc, &w| {
-        let acc = c.apply(if index & 1 == 1 { [w, acc] } else { [acc, w] });
-        index >>= 1;
-        acc
-    });
-    (claim == found).then_some(()).ok_or(Error::Verify)
-}
+    fn query<Transcript>(
+        &self,
+        transcript: &mut Transcript,
+        index: usize,
+        data: &Self::MerkleData,
+    ) -> Result<Vec<Ext>, crate::Error>
+    where
+        Transcript: Writer<F> + Writer<<Self::MerkleData as MerkleData>::Digest>;
 
-pub struct MerkleTree<F: Field, Digest, H: Hasher<F, Digest>, C: Compress<Digest, 2>> {
-    pub(crate) hasher: H,
-    pub(crate) compress: C,
-    pub(crate) _phantom: std::marker::PhantomData<(F, Digest)>,
-}
-
-impl<F, Digest, H, C> MerkleTree<F, Digest, H, C>
-where
-    F: Field,
-    H: Hasher<F, Digest>,
-    C: Compress<Digest, 2>,
-{
-    pub fn new(hasher: H, compress: C) -> Self {
-        Self {
-            hasher,
-            compress,
-            _phantom: std::marker::PhantomData,
-        }
-    }
+    fn verify<Transcript>(
+        &self,
+        transcript: &mut Transcript,
+        comm: <Self::MerkleData as MerkleData>::Digest,
+        index: usize,
+        width: usize,
+        k: usize,
+    ) -> Result<Vec<Ext>, crate::Error>
+    where
+        Transcript: Reader<F> + Reader<<Self::MerkleData as MerkleData>::Digest>;
 }
 
 #[cfg(test)]
 mod test {
+    use std::ops::Range;
 
-    use crate::merkle::poseidon::PoseidonHasher;
-    use crate::merkle::rust_crypto::RustCryptoHasher;
-    use crate::merkle::{hash_reference_base, hash_reference_ext, Hasher};
-    use crate::utils::n_rand;
-    use p3_baby_bear::Poseidon2BabyBear;
-    use p3_field::extension::BinomialExtensionField;
-    use p3_field::{ExtensionField, Field};
-    use p3_goldilocks::Poseidon2Goldilocks;
+    use crate::{
+        merkle::{
+            poseidon::PoseidonMerkleTree, poseidon_packed::PackedPoseidonMerkleTree,
+            rust_crypto::RustCryptoMerkleTree, MerkleData, MerkleTree, MerkleTreeExt,
+        },
+        transcript::{
+            test_transcript::{TestReader, TestWriter},
+            ChallengeBits, Reader, Writer,
+        },
+        utils::n_rand,
+    };
+    use p3_field::{extension::BinomialExtensionField, ExtensionField, Field};
     use p3_koala_bear::Poseidon2KoalaBear;
     use p3_matrix::dense::RowMajorMatrix;
-    use p3_matrix::extension::FlatMatrixView;
-    use p3_symmetric::PaddingFreeSponge;
+    use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
     use rand::distr::{Distribution, StandardUniform};
-    use std::fmt::Debug;
 
-    fn run_test_hash_base<F: Field, H: Hasher<F, Out>, Out: Debug + PartialEq + Send + Sync>(
+    fn prover_base<F: Field, Transcript, M: MerkleTree<F>>(
+        mut rng: impl rand::RngCore,
+        transcript: &mut Transcript,
+        m: M,
+        width: Range<usize>,
         k: usize,
-        folding: usize,
-        hasher: &H,
     ) where
         StandardUniform: Distribution<F>,
+        Transcript: Writer<<M::MerkleData as MerkleData>::Digest> + Writer<F> + Clone,
     {
-        let mut rng = crate::test::rng(0);
-        let values: Vec<F> = n_rand::<F>(&mut rng, 1 << k);
-        let data = RowMajorMatrix::new(values, 1 << folding);
-        let l0 = hash_reference_ext::<F, F, _, _>(&data, hasher);
-        let l1 = hash_reference_base::<F, _, _>(&data, hasher);
-        assert_eq!(l0, l1);
-        let l1 = hasher.hash_base_data(&data);
-        assert_eq!(l0, l1);
+        for width in width {
+            let coeffs = n_rand(&mut rng, (1 << k) * width);
+            let data = RowMajorMatrix::new(coeffs, width);
+            let comm0 = m.commit(transcript, data.clone()).unwrap();
+
+            (0..1 << k).for_each(|index| {
+                m.query(transcript, index, &comm0).unwrap();
+            });
+        }
     }
 
-    fn run_test_hash_ext<
-        F: Field,
-        Ext: ExtensionField<F>,
-        H: Hasher<F, Out>,
-        Out: Debug + PartialEq + Send + Sync,
-    >(
+    fn verifier_base<F: Field, Transcript, M: MerkleTree<F>>(
+        transcript: &mut Transcript,
+        m: M,
+        width: Range<usize>,
         k: usize,
-        folding: usize,
-        hasher: &H,
     ) where
-        StandardUniform: Distribution<Ext>,
+        Transcript: Reader<<M::MerkleData as MerkleData>::Digest> + Reader<F>,
     {
-        let mut rng = crate::test::rng(0);
-        let values: Vec<Ext> = n_rand::<Ext>(&mut rng, 1 << k);
-        let data = RowMajorMatrix::new(values, 1 << folding);
-        let l0 = hash_reference_ext::<F, Ext, _, _>(&data, hasher);
-        let data = FlatMatrixView::<F, Ext, _>::new(data);
-        let l1 = hasher.hash_ext_data(&data);
-        assert_eq!(l0, l1);
+        for width in width {
+            let comm: <M::MerkleData as MerkleData>::Digest = transcript.read().unwrap();
+
+            (0..1 << k).for_each(|index| {
+                m.verify(transcript, comm, index, width, k).unwrap();
+            });
+        }
     }
 
-    fn run_test_hash<
-        F: Field,
-        Ext: ExtensionField<F>,
-        H: Hasher<F, Out>,
-        Out: Debug + PartialEq + Send + Sync,
-    >(
-        hasher: &H,
+    fn prover_ext<F: Field, Ext: ExtensionField<F>, Transcript, M: MerkleTreeExt<F, Ext>>(
+        mut rng: impl rand::RngCore,
+        transcript: &mut Transcript,
+        m: M,
+        width: Range<usize>,
+        k: usize,
     ) where
-        StandardUniform: Distribution<F>,
         StandardUniform: Distribution<Ext>,
+        Transcript: Writer<<M::MerkleData as MerkleData>::Digest> + Writer<F> + Clone,
     {
-        for k in 0..10 {
-            for folding in 0..=k {
-                run_test_hash_base(k, folding, hasher);
-            }
-        }
-
-        for k in 0..10 {
-            for folding in 0..=k {
-                run_test_hash_ext::<F, F, H, _>(k, folding, hasher);
-                run_test_hash_ext::<F, Ext, H, _>(k, folding, hasher);
-            }
+        for width in width {
+            let coeffs = n_rand(&mut rng, (1 << k) * width);
+            let data = RowMajorMatrix::new(coeffs, width);
+            let comm = m.commit(transcript, data.clone()).unwrap();
+            (0..1 << k).for_each(|index| {
+                m.query(transcript, index, &comm).unwrap();
+            });
         }
     }
-    #[test]
-    fn test_hash_poseidon() {
-        {
-            type F = p3_koala_bear::KoalaBear;
-            type Ext = BinomialExtensionField<F, 4>;
 
-            let perm = Poseidon2KoalaBear::<16>::new_from_rng_128(&mut crate::test::rng(0));
-            let hasher: PaddingFreeSponge<_, 16, 8, 8> = PaddingFreeSponge::new(perm);
-            run_test_hash::<F, Ext, _, _>(&PoseidonHasher::<F, _, 8>::new(hasher));
-
-            let perm = Poseidon2KoalaBear::<24>::new_from_rng_128(&mut crate::test::rng(0));
-            let hasher: PaddingFreeSponge<_, 24, 16, 8> = PaddingFreeSponge::new(perm);
-            run_test_hash::<F, Ext, _, _>(&PoseidonHasher::<F, _, 8>::new(hasher));
-        }
-
-        {
-            type F = p3_baby_bear::BabyBear;
-            type Ext = BinomialExtensionField<F, 4>;
-
-            let perm = Poseidon2BabyBear::<16>::new_from_rng_128(&mut crate::test::rng(0));
-            let hasher: PaddingFreeSponge<_, 16, 8, 8> = PaddingFreeSponge::new(perm);
-            run_test_hash::<F, Ext, _, _>(&PoseidonHasher::<F, _, 8>::new(hasher));
-
-            let perm = Poseidon2BabyBear::<24>::new_from_rng_128(&mut crate::test::rng(0));
-            let hasher: PaddingFreeSponge<_, 24, 16, 8> = PaddingFreeSponge::new(perm);
-            run_test_hash::<F, Ext, _, _>(&PoseidonHasher::<F, _, 8>::new(hasher));
-        }
-
-        {
-            type F = p3_goldilocks::Goldilocks;
-            type Ext = BinomialExtensionField<F, 2>;
-
-            let perm = Poseidon2Goldilocks::<8>::new_from_rng_128(&mut crate::test::rng(0));
-            let hasher: PaddingFreeSponge<_, 8, 4, 4> = PaddingFreeSponge::new(perm);
-            run_test_hash::<F, Ext, _, _>(&PoseidonHasher::<F, _, 4>::new(hasher));
+    fn verifier_ext<F: Field, Ext: ExtensionField<F>, Transcript, M: MerkleTreeExt<F, Ext>>(
+        transcript: &mut Transcript,
+        m: M,
+        width: Range<usize>,
+        k: usize,
+    ) where
+        Transcript: Reader<<M::MerkleData as MerkleData>::Digest> + Reader<F>,
+    {
+        for width in width {
+            let comm: <M::MerkleData as MerkleData>::Digest = transcript.read().unwrap();
+            (0..1 << k).for_each(|index| {
+                m.verify(transcript, comm, index, width, k).unwrap();
+            });
         }
     }
 
     #[test]
-    fn test_hash_rust_crypto() {
-        {
-            type F = p3_koala_bear::KoalaBear;
-            type Ext = BinomialExtensionField<F, 4>;
-            let hasher = RustCryptoHasher::<sha2::Sha256>::default();
-            run_test_hash::<F, Ext, _, _>(&hasher);
+    fn test_merkle_base_rustcrypto() {
+        type F = p3_koala_bear::KoalaBear;
+
+        let mut rng = crate::test::rng(0);
+        for k in 1..9 {
+            {
+                let mut transcript = TestWriter::<Vec<u8>, F>::init();
+                let m = RustCryptoMerkleTree::<sha2::Sha256>::default();
+                prover_base::<F, TestWriter<Vec<u8>, F>, _>(&mut rng, &mut transcript, m, 1..7, k);
+
+                let proof = transcript.finalize();
+                let mut transcript = TestReader::<&[u8], F>::init(&proof);
+                let m = RustCryptoMerkleTree::<sha2::Sha256>::default();
+                verifier_base::<F, _, _>(&mut transcript, m, 1..7, k);
+            }
         }
+    }
+
+    #[test]
+    fn test_merkle_ext_rustcrypto() {
+        type F = p3_koala_bear::KoalaBear;
+        type Ext = BinomialExtensionField<F, 4>;
+
+        let mut rng = crate::test::rng(0);
+        for k in 1..9 {
+            {
+                let mut transcript = TestWriter::<Vec<u8>, F>::init();
+                let m = RustCryptoMerkleTree::<sha2::Sha256>::default();
+                prover_ext::<F, Ext, TestWriter<Vec<u8>, F>, _>(
+                    &mut rng,
+                    &mut transcript,
+                    m,
+                    1..7,
+                    k,
+                );
+
+                let proof = transcript.finalize();
+                let mut transcript = TestReader::<&[u8], F>::init(&proof);
+                let m = RustCryptoMerkleTree::<sha2::Sha256>::default();
+                verifier_ext::<F, Ext, _, _>(&mut transcript, m, 1..7, k);
+            }
+        }
+    }
+
+    #[test]
+    fn test_merkle_base() {
+        type F = p3_koala_bear::KoalaBear;
+        type Poseidon16 = Poseidon2KoalaBear<16>;
+        type Poseidon24 = Poseidon2KoalaBear<24>;
+
+        type Hasher = PaddingFreeSponge<Poseidon24, 24, 16, 8>;
+        type Compress = TruncatedPermutation<Poseidon16, 2, 8, 16>;
+
+        let perm16 = Poseidon16::new_from_rng_128(&mut crate::test::rng(1000));
+        let perm24 = Poseidon24::new_from_rng_128(&mut crate::test::rng(1000));
+
+        let hasher = Hasher::new(perm24.clone());
+        let compress = Compress::new(perm16.clone());
+
+        let mut rng = crate::test::rng(0);
+        for k in 1..9 {
+            {
+                let mut transcript = TestWriter::<Vec<u8>, F>::init();
+                let m = PoseidonMerkleTree::new(hasher.clone(), compress.clone());
+                prover_base::<F, _, _>(&mut rng, &mut transcript, m, 1..7, k);
+
+                let proof = transcript.finalize();
+                let mut transcript = TestReader::<&[u8], F>::init(&proof);
+                let m = PoseidonMerkleTree::new(hasher.clone(), compress.clone());
+                verifier_base::<F, _, _>(&mut transcript, m, 1..7, k);
+            }
+        }
+    }
+
+    #[test]
+    fn test_merkle_ext() {
+        type F = p3_koala_bear::KoalaBear;
+        type Ext = BinomialExtensionField<F, 4>;
+        type Poseidon16 = Poseidon2KoalaBear<16>;
+        type Poseidon24 = Poseidon2KoalaBear<24>;
+
+        type Hasher = PaddingFreeSponge<Poseidon24, 24, 16, 8>;
+        type Compress = TruncatedPermutation<Poseidon16, 2, 8, 16>;
+
+        let perm16 = Poseidon16::new_from_rng_128(&mut crate::test::rng(1000));
+        let perm24 = Poseidon24::new_from_rng_128(&mut crate::test::rng(1000));
+
+        let hasher = Hasher::new(perm24.clone());
+        let compress = Compress::new(perm16.clone());
+
+        let mut rng = crate::test::rng(0);
+        for k in 1..9 {
+            {
+                let mut transcript = TestWriter::<Vec<u8>, F>::init();
+                let m = PoseidonMerkleTree::new(hasher.clone(), compress.clone());
+                prover_ext::<F, Ext, _, _>(&mut rng, &mut transcript, m, 1..7, k);
+
+                let proof = transcript.finalize();
+                let mut transcript = TestReader::<&[u8], F>::init(&proof);
+                let m = PoseidonMerkleTree::new(hasher.clone(), compress.clone());
+                verifier_ext::<F, Ext, _, _>(&mut transcript, m, 1..7, k);
+            }
+        }
+    }
+
+    #[test]
+    fn test_merkle_base_packed() {
+        type F = p3_koala_bear::KoalaBear;
+        type Poseidon16 = Poseidon2KoalaBear<16>;
+        type Poseidon24 = Poseidon2KoalaBear<24>;
+
+        type Hasher = PaddingFreeSponge<Poseidon24, 24, 16, 8>;
+        type Compress = TruncatedPermutation<Poseidon16, 2, 8, 16>;
+
+        let perm16 = Poseidon16::new_from_rng_128(&mut crate::test::rng(1000));
+        let perm24 = Poseidon24::new_from_rng_128(&mut crate::test::rng(1000));
+
+        let hasher = Hasher::new(perm24.clone());
+        let compress = Compress::new(perm16.clone());
+
+        let mut rng = crate::test::rng(0);
+        for k in 1..9 {
+            {
+                let mut transcript = TestWriter::<Vec<u8>, F>::init();
+                let m = PackedPoseidonMerkleTree::new(hasher.clone(), compress.clone());
+                prover_base::<F, _, _>(&mut rng, &mut transcript, m, 1..7, k);
+
+                let proof = transcript.finalize();
+                let mut transcript = TestReader::<&[u8], F>::init(&proof);
+                let m = PackedPoseidonMerkleTree::new(hasher.clone(), compress.clone());
+                verifier_base::<F, _, _>(&mut transcript, m, 1..7, k);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_merkle_base_packed() {
+        type F = p3_koala_bear::KoalaBear;
+        type Poseidon16 = Poseidon2KoalaBear<16>;
+        type Poseidon24 = Poseidon2KoalaBear<24>;
+
+        type Hasher = PaddingFreeSponge<Poseidon24, 24, 16, 8>;
+        type Compress = TruncatedPermutation<Poseidon16, 2, 8, 16>;
+
+        let perm16 = Poseidon16::new_from_rng_128(&mut crate::test::rng(1000));
+        let perm24 = Poseidon24::new_from_rng_128(&mut crate::test::rng(1000));
+
+        let hasher = Hasher::new(perm24.clone());
+        let compress = Compress::new(perm16.clone());
+
+        let mut rng = crate::test::rng(0);
+        let k = 21;
+        let width = 32;
+
+        crate::test::init_tracing();
+        let mut transcript = TestWriter::<Vec<u8>, F>::init();
+        let coeffs: Vec<F> = n_rand(&mut rng, (1 << k) * width);
+        let data = RowMajorMatrix::new(coeffs, width);
+        let m = PackedPoseidonMerkleTree::new(hasher.clone(), compress.clone());
+        let comm = MerkleTree::commit(&m, &mut transcript, data).unwrap();
+        let idx: usize = transcript.draw(k);
+        MerkleTree::query(&m, &mut transcript, idx, &comm).unwrap();
+
+        let proof = transcript.finalize();
+        let mut transcript = TestReader::<&[u8], F>::init(&proof);
+        let m = PackedPoseidonMerkleTree::new(hasher.clone(), compress.clone());
+        let comm = transcript.read().unwrap();
+        let idx: usize = transcript.draw(k);
+        MerkleTree::verify(&m, &mut transcript, comm, idx, width, k).unwrap();
+    }
+
+    #[test]
+    fn test_merkle_ext_packed() {
+        type F = p3_koala_bear::KoalaBear;
+        type Ext = BinomialExtensionField<F, 4>;
+        type Poseidon16 = Poseidon2KoalaBear<16>;
+        type Poseidon24 = Poseidon2KoalaBear<24>;
+
+        type Hasher = PaddingFreeSponge<Poseidon24, 24, 16, 8>;
+        type Compress = TruncatedPermutation<Poseidon16, 2, 8, 16>;
+
+        let perm16 = Poseidon16::new_from_rng_128(&mut crate::test::rng(1000));
+        let perm24 = Poseidon24::new_from_rng_128(&mut crate::test::rng(1000));
+
+        let hasher = Hasher::new(perm24.clone());
+        let compress = Compress::new(perm16.clone());
 
         {
-            type F = p3_baby_bear::BabyBear;
-            type Ext = BinomialExtensionField<F, 4>;
-            let hasher = RustCryptoHasher::<sha2::Sha256>::default();
-            run_test_hash::<F, Ext, _, _>(&hasher);
-        }
+            let mut rng = crate::test::rng(0);
+            for k in 1..9 {
+                {
+                    let mut transcript = TestWriter::<Vec<u8>, F>::init();
+                    let m = PackedPoseidonMerkleTree::new(hasher.clone(), compress.clone());
+                    prover_ext::<F, Ext, _, _>(&mut rng, &mut transcript, m, 1..7, k);
 
-        {
-            type F = p3_koala_bear::KoalaBear;
-            type Ext = BinomialExtensionField<F, 4>;
-            let hasher = RustCryptoHasher::<sha2::Sha256>::default();
-            run_test_hash::<F, Ext, _, _>(&hasher);
+                    let proof = transcript.finalize();
+                    let mut transcript = TestReader::<&[u8], F>::init(&proof);
+                    let m = PackedPoseidonMerkleTree::new(hasher.clone(), compress.clone());
+                    verifier_ext::<F, Ext, _, _>(&mut transcript, m, 1..7, k);
+                }
+            }
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_merkle_ext_packed() {
+        type F = p3_koala_bear::KoalaBear;
+        type Ext = BinomialExtensionField<F, 4>;
+        type Poseidon16 = Poseidon2KoalaBear<16>;
+        type Poseidon24 = Poseidon2KoalaBear<24>;
+
+        type Hasher = PaddingFreeSponge<Poseidon24, 24, 16, 8>;
+        type Compress = TruncatedPermutation<Poseidon16, 2, 8, 16>;
+
+        let perm16 = Poseidon16::new_from_rng_128(&mut crate::test::rng(1000));
+        let perm24 = Poseidon24::new_from_rng_128(&mut crate::test::rng(1000));
+
+        let hasher = Hasher::new(perm24.clone());
+        let compress = Compress::new(perm16.clone());
+
+        let mut rng = crate::test::rng(0);
+        let k = 18;
+        let width = 32;
+
+        // crate::test::init_tracing();
+        let mut transcript = TestWriter::<Vec<u8>, F>::init();
+        let coeffs: Vec<Ext> = n_rand(&mut rng, (1 << k) * width);
+        let data = RowMajorMatrix::new(coeffs, width);
+        let m = PackedPoseidonMerkleTree::new(hasher.clone(), compress.clone());
+        let comm = MerkleTreeExt::commit(&m, &mut transcript, data).unwrap();
+        let idx: usize = transcript.draw(k);
+        MerkleTreeExt::query(&m, &mut transcript, idx, &comm).unwrap();
+
+        let proof = transcript.finalize();
+        let mut transcript = TestReader::<&[u8], F>::init(&proof);
+        let m = PackedPoseidonMerkleTree::new(hasher.clone(), compress.clone());
+        let comm: [F; 8] = transcript.read().unwrap();
+        let idx: usize = transcript.draw(k);
+        MerkleTreeExt::<F, Ext>::verify(&m, &mut transcript, comm, idx, width, k).unwrap();
     }
 }

@@ -37,11 +37,7 @@ impl<F: Field, Ext: ExtensionField<F>> Claim<F, Ext> {
 mod test {
     use crate::{
         field::SerializedField,
-        merkle::{
-            poseidon::{PoseidonCompress, PoseidonHasher},
-            rust_crypto::{RustCryptoCompress, RustCryptoHasher},
-            MerkleTree,
-        },
+        merkle::{poseidon_packed::PackedPoseidonMerkleTree, rust_crypto::RustCryptoMerkleTree},
         pcs::{params::SecurityAssumption, whir::Whir, Claim},
         poly::{Coeff, Eval, Point, Poly},
         transcript::{
@@ -55,7 +51,7 @@ mod test {
     use p3_field::{extension::BinomialExtensionField, ExtensionField, Field, TwoAdicField};
     use p3_koala_bear::Poseidon2KoalaBear;
     use p3_matrix::{dense::RowMajorMatrix, Matrix};
-    use p3_symmetric::PaddingFreeSponge;
+    use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
     use rand::{
         distr::{Distribution, StandardUniform},
         Rng,
@@ -222,14 +218,8 @@ mod test {
         type Writer = RustCryptoWriter<Vec<u8>, sha3::Keccak256>;
         type Reader<'a> = RustCryptoReader<&'a [u8], sha3::Keccak256>;
 
-        type Hasher = RustCryptoHasher<sha3::Keccak256>;
-        type Compress = RustCryptoCompress<sha3::Keccak256>;
-
-        let hasher = Hasher::default();
-        let compress = Compress::default();
-
-        let comm = MerkleTree::<F, [u8; 32], _, _>::new(hasher.clone(), compress.clone());
-        let comm_ext = MerkleTree::<F, [u8; 32], _, _>::new(hasher, compress);
+        let mt = RustCryptoMerkleTree::<sha2::Sha256>::default();
+        let mt_ext = RustCryptoMerkleTree::<sha2::Sha256>::default();
 
         let whir = Whir::new(
             k,
@@ -238,8 +228,8 @@ mod test {
             initial_reduction,
             soundness,
             security_level,
-            comm,
-            comm_ext,
+            mt,
+            mt_ext,
         );
 
         let mut rng = &mut crate::test::rng(1);
@@ -317,22 +307,20 @@ mod test {
         type Poseidon16 = Poseidon2KoalaBear<16>;
         type Poseidon24 = Poseidon2KoalaBear<24>;
 
-        type Compress = PoseidonCompress<F, Poseidon16, 2, 8, 16>;
-        type Digest = [F; 8];
+        type Hasher = PaddingFreeSponge<Poseidon24, 24, 16, 8>;
+        type Compress = TruncatedPermutation<Poseidon16, 2, 8, 16>;
         type Challenger = DuplexChallenger<F, Poseidon16, 16, 8>;
+        type Digest = [F; 8];
         type Writer = PoseidonWriter<Vec<u8>, F, Challenger>;
         type Reader<'a> = PoseidonReader<&'a [u8], F, Challenger>;
 
         let perm16 = Poseidon16::new_from_rng_128(&mut crate::test::rng(1000));
         let perm24 = Poseidon24::new_from_rng_128(&mut crate::test::rng(1000));
-        let hasher: PaddingFreeSponge<_, 24, 16, 8> = PaddingFreeSponge::new(perm24);
 
-        let hasher = PoseidonHasher::<F, _, 8>::new(hasher);
+        let hasher = Hasher::new(perm24.clone());
         let compress = Compress::new(perm16.clone());
         let challenger = Challenger::new(perm16.clone());
 
-        let comm = MerkleTree::<F, Digest, _, _>::new(hasher.clone(), compress.clone());
-        let comm_ext = MerkleTree::<F, Digest, _, _>::new(hasher, compress);
         let whir = Whir::new(
             k,
             folding,
@@ -340,8 +328,8 @@ mod test {
             initial_reduction,
             soundness,
             security_level,
-            comm,
-            comm_ext,
+            PackedPoseidonMerkleTree::<F, _, _, 8>::new(hasher.clone(), compress.clone()),
+            PackedPoseidonMerkleTree::<F, _, _, 8>::new(hasher.clone(), compress.clone()),
         );
 
         let mut rng = &mut crate::test::rng(1);
@@ -406,7 +394,7 @@ mod test {
     }
 
     #[test]
-    #[ignore]
+    // #[ignore]
     fn whir_bench() {
         crate::test::init_tracing();
         run_whir_poseidon(25, 5, 1, 3, SecurityAssumption::CapacityBound, 90, 1);

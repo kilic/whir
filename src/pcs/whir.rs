@@ -6,7 +6,7 @@ use p3_matrix::Matrix;
 use transpose::transpose;
 
 use crate::{
-    merkle::comm::{Commitment, CommitmentData},
+    merkle::{MerkleData, MerkleTree, MerkleTreeExt},
     pcs::{
         params::{compute_number_of_rounds, SecurityAssumption},
         sumcheck::{Sumcheck, SumcheckVerifier},
@@ -17,15 +17,15 @@ use crate::{
     utils::{unsafe_allocate_zero_vec, TwoAdicSlice},
 };
 
-pub fn commit_base<Transcript, F: TwoAdicField, MCom: Commitment<F>>(
+pub fn commit_base<Transcript, F: TwoAdicField, MT: MerkleTree<F>>(
     transcript: &mut Transcript,
     poly: &[F],
     rate: usize,
     folding: usize,
-    mat_comm: &MCom,
-) -> Result<CommitmentData<F, F, MCom::Digest>, crate::Error>
+    mt: &MT,
+) -> Result<MT::MerkleData, crate::Error>
 where
-    Transcript: Writer<MCom::Digest>,
+    Transcript: Writer<<MT::MerkleData as MerkleData>::Digest>,
 {
     // pad
     let mut padded: Vec<F> = crate::utils::unsafe_allocate_zero_vec(1 << (poly.k() + rate));
@@ -35,23 +35,18 @@ where
     let mat = RowMajorMatrix::new(padded, 1 << folding);
     let codeword = tracing::info_span!("dft-base", height = mat.height(), width = mat.width())
         .in_scope(|| Radix2DFTSmallBatch::<F>::default().dft_batch(mat));
-    mat_comm.commit_base(transcript, codeword)
+    mt.commit(transcript, codeword)
 }
 
-pub fn commit_ext<
-    Transcript,
-    F: TwoAdicField,
-    Ext: ExtensionField<F> + TwoAdicField,
-    MCom: Commitment<F>,
->(
+pub fn commit_ext<Transcript, F: TwoAdicField, Ext: ExtensionField<F>, MT: MerkleTreeExt<F, Ext>>(
     transcript: &mut Transcript,
     poly: &[Ext],
     rate: usize,
     folding: usize,
-    mat_comm: &MCom,
-) -> Result<CommitmentData<F, Ext, MCom::Digest>, crate::Error>
+    mt: &MT,
+) -> Result<MT::MerkleData, crate::Error>
 where
-    Transcript: Writer<MCom::Digest>,
+    Transcript: Writer<<MT::MerkleData as MerkleData>::Digest>,
 {
     // pad
     let mut padded: Vec<Ext> = crate::utils::unsafe_allocate_zero_vec(1 << (poly.k() + rate));
@@ -61,7 +56,7 @@ where
     let mat = RowMajorMatrix::new(padded, 1 << folding);
     let codeword = tracing::info_span!("dft-ext", h = mat.height(), w = mat.width())
         .in_scope(|| Radix2DFTSmallBatch::<F>::default().dft_algebra_batch(mat));
-    mat_comm.commit_ext(transcript, codeword)
+    mt.commit(transcript, codeword)
 }
 
 fn stir_indicies<Transcript>(
@@ -82,8 +77,8 @@ where
 pub struct Whir<
     F: TwoAdicField,
     Ext: ExtensionField<F>,
-    MCom: Commitment<F>,
-    MComExt: Commitment<F>,
+    MT: MerkleTree<F>,
+    MTExt: MerkleTreeExt<F, Ext>,
 > {
     pub k: usize,
     pub folding: usize,
@@ -91,17 +86,17 @@ pub struct Whir<
     pub initial_reduction: usize,
     soundness: SecurityAssumption,
     security_level: usize,
-    comm: MCom,
-    comm_ext: MComExt,
+    mt: MT,
+    mt_ext: MTExt,
     _marker: std::marker::PhantomData<(F, Ext)>,
 }
 
 impl<
         F: TwoAdicField,
         Ext: ExtensionField<F> + TwoAdicField,
-        MCom: Commitment<F>,
-        MComExt: Commitment<F>,
-    > Whir<F, Ext, MCom, MComExt>
+        MT: MerkleTree<F>,
+        MTExt: MerkleTreeExt<F, Ext>,
+    > Whir<F, Ext, MT, MTExt>
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -111,8 +106,8 @@ impl<
         initial_reduction: usize,
         soundness: SecurityAssumption,
         security_level: usize,
-        comm: MCom,
-        comm_ext: MComExt,
+        mt: MT,
+        mt_ext: MTExt,
     ) -> Self {
         Self {
             k,
@@ -121,8 +116,8 @@ impl<
             initial_reduction,
             soundness,
             security_level,
-            comm,
-            comm_ext,
+            mt,
+            mt_ext,
             _marker: std::marker::PhantomData,
         }
     }
@@ -131,15 +126,16 @@ impl<
         &self,
         transcript: &mut Transcript,
         poly: &Poly<F, Coeff>,
-    ) -> Result<CommitmentData<F, F, MCom::Digest>, crate::Error>
+    ) -> Result<MT::MerkleData, crate::Error>
     where
-        Transcript: Writer<Ext> + Writer<MCom::Digest> + Challenge<F, Ext>,
+        Transcript:
+            Writer<Ext> + Writer<<MT::MerkleData as MerkleData>::Digest> + Challenge<F, Ext>,
     {
         let mut transposed = unsafe_allocate_zero_vec(poly.len());
         let width = 1 << self.folding;
         tracing::info_span!("transpose")
             .in_scope(|| transpose::transpose(poly, &mut transposed, poly.len() / width, width));
-        commit_base(transcript, &transposed, self.rate, self.folding, &self.comm)
+        commit_base(transcript, &transposed, self.rate, self.folding, &self.mt)
     }
 
     fn n_ood_queries(&self, k: usize, rate: usize) -> usize {
@@ -173,14 +169,14 @@ impl<
         &self,
         transcript: &mut Transcript,
         claims: Vec<Claim<Ext, Ext>>,
-        comm_data: CommitmentData<F, F, MCom::Digest>,
+        comm_data: MT::MerkleData,
         poly: Poly<F, Coeff>,
     ) -> Result<(), crate::Error>
     where
         Transcript: Writer<F>
             + Writer<Ext>
-            + Writer<MCom::Digest>
-            + Writer<MComExt::Digest>
+            + Writer<<MT::MerkleData as MerkleData>::Digest>
+            + Writer<<MTExt::MerkleData as MerkleData>::Digest>
             + Challenge<F, Ext>
             + ChallengeBits,
     {
@@ -190,32 +186,37 @@ impl<
         // draw an univarite point
         // evaluate poly at the point
         // derive the multivariate point
+
+        // get the evaluation representation of the polynomial
+        let poly_in_evals = tracing::info_span!("to evals").in_scope(|| poly.to_evals());
+
+        // generate out-of-domain claims
         let ood_claims = tracing::info_span!("ood claims").in_scope(|| {
             (0..n_ood_queries)
                 .map(|_| {
                     let point: Ext = Challenge::draw(transcript);
-                    let eval = poly.eval_univariate(point);
+                    let point = Point::expand(poly_in_evals.k(), point);
+                    let eval = poly_in_evals.eval::<Ext>(&point);
                     transcript.write(eval)?;
-                    let point = Point::expand(poly.k(), point);
                     Ok(Claim::new(point, eval))
                 })
                 .collect::<Result<Vec<_>, _>>()
         })?;
 
+        // concat original claims with ood claims
         let claims = itertools::chain!(claims, ood_claims).collect::<Vec<_>>();
 
         // draw sumcheck constraint combination challenge
         let alpha: Ext = Challenge::draw(transcript);
         // initialize the sumcheck instance
         // `self.folding` number of rounds is run
-        let mut sumcheck =
-            Sumcheck::new(transcript, self.folding, alpha, &claims, &poly.to_evals())?;
+        let mut sumcheck = Sumcheck::new(transcript, self.folding, alpha, &claims, &poly_in_evals)?;
 
         // derive number of rounds
         let (n_rounds, final_sumcheck_rounds) = compute_number_of_rounds(self.folding, self.k);
 
         let width = 1 << self.folding;
-        let mut round_data: Option<CommitmentData<F, Ext, _>> = None;
+        let mut round_data: Option<MTExt::MerkleData> = None;
         let mut round_point: Option<Point<Ext>> = None;
 
         // run folding rounds
@@ -228,7 +229,7 @@ impl<
                 let poly_in_coeffs = sumcheck.poly().clone().to_coeffs();
 
                 // commit to the polynomial in coefficient representation
-                let _round_data: CommitmentData<F, Ext, _> = {
+                let _round_data: MTExt::MerkleData = {
                     // rearrange coefficients since variables are fixed in backwards order
                     let mut transposed = unsafe_allocate_zero_vec(poly_in_coeffs.len());
                     let height = poly_in_coeffs.len() / width;
@@ -239,23 +240,23 @@ impl<
                         &transposed,
                         this_rate,
                         self.folding,
-                        &self.comm_ext,
+                        &self.mt_ext,
                     )
                 }?;
 
                 // find ood claims
-                let ood_claims = {
+                let ood_claims = tracing::info_span!("ood claims in round").in_scope(|| {
                     let n_ood_queries = self.n_ood_queries(sumcheck.k(), this_rate);
                     (0..n_ood_queries)
                         .map(|_| {
                             let point: Ext = Challenge::draw(transcript);
-                            let eval = poly_in_coeffs.eval_univariate(point);
-                            transcript.write(eval)?;
                             let point = Point::expand(poly_in_coeffs.k(), point);
+                            let eval = sumcheck.poly().eval(&point);
+                            transcript.write(eval)?;
                             Ok(Claim::new(point, eval))
                         })
                         .collect::<Result<Vec<_>, _>>()
-                }?;
+                })?;
 
                 // derive number of stir queries
                 let n_stir_queries = self.n_stir_queries(prev_rate);
@@ -273,7 +274,7 @@ impl<
                     let round_point = sumcheck.rs();
                     let cw_local_polys = indicies
                         .iter()
-                        .map(|&index| self.comm.query(transcript, index, &comm_data))
+                        .map(|&index| self.mt.query(transcript, index, &comm_data))
                         .collect::<Result<Vec<_>, crate::Error>>()?;
 
                     cw_local_polys
@@ -296,7 +297,7 @@ impl<
                     let cw_local_polys = indicies
                         .iter()
                         .map(|&index| {
-                            self.comm_ext
+                            self.mt_ext
                                 .query(transcript, index, round_data.as_ref().unwrap())
                         })
                         .collect::<Result<Vec<_>, crate::Error>>()?;
@@ -349,7 +350,7 @@ impl<
 
             if let Some(round_data) = &round_data {
                 indicies.iter().try_for_each(|&index| {
-                    let _local_poly = self.comm_ext.query(transcript, index, round_data)?;
+                    let _local_poly = self.mt_ext.query(transcript, index, round_data)?;
 
                     #[cfg(debug_assertions)]
                     {
@@ -362,7 +363,7 @@ impl<
                 })?;
             } else {
                 indicies.iter().try_for_each(|&index| {
-                    let _local_poly = self.comm.query(transcript, index, &comm_data)?;
+                    let _local_poly = self.mt.query(transcript, index, &comm_data)?;
 
                     #[cfg(debug_assertions)]
                     {
@@ -386,13 +387,13 @@ impl<
         &self,
         transcript: &mut Transcript,
         claims: Vec<Claim<Ext, Ext>>,
-        comm: MCom::Digest,
+        comm: <MT::MerkleData as MerkleData>::Digest,
     ) -> Result<(), crate::Error>
     where
         Transcript: Reader<F>
             + Reader<Ext>
-            + Reader<MComExt::Digest>
-            + Reader<MCom::Digest>
+            + Reader<<MT::MerkleData as MerkleData>::Digest>
+            + Reader<<MTExt::MerkleData as MerkleData>::Digest>
             + Challenge<F, Ext>
             + ChallengeBits,
     {
@@ -420,7 +421,7 @@ impl<
         let mut round_point = sumcheck.fold(transcript, self.folding, alpha, &[], &claims)?;
 
         // round commitment is used validate stir points in the next set of rounds
-        let mut round_comm: Option<MComExt::Digest> = None;
+        let mut round_comm: Option<<MTExt::MerkleData as MerkleData>::Digest> = None;
 
         // run folding rounds
         let (n_rounds, final_sumcheck_rounds) = compute_number_of_rounds(self.folding, self.k);
@@ -429,7 +430,7 @@ impl<
             let (k_folded_domain, this_rate, prev_rate) = self.round_params(round);
 
             // read round commitment
-            let _round_comm: MComExt::Digest = transcript.read()?;
+            let _round_comm: <MTExt::MerkleData as MerkleData>::Digest = transcript.read()?;
 
             // read ood claims
             let n_ood_queries = self.n_ood_queries(sumcheck.k(), this_rate);
@@ -455,7 +456,7 @@ impl<
                     .iter()
                     .map(|&index| {
                         // verify and get leafs which will behave as local polynomials
-                        let local_poly = self.comm.verify::<_, F>(
+                        let local_poly = self.mt.verify(
                             transcript,
                             comm,
                             index,
@@ -476,7 +477,7 @@ impl<
                     .iter()
                     .map(|&index| {
                         // verify and get leafs which will behave as local polynomials
-                        let local_poly = self.comm_ext.verify::<_, Ext>(
+                        let local_poly = self.mt_ext.verify(
                             transcript,
                             *round_comm.as_ref().unwrap(),
                             index,
@@ -522,7 +523,7 @@ impl<
             indicies
                 .iter()
                 .map(|&index| {
-                    let local_poly = self.comm_ext.verify::<_, Ext>(
+                    let local_poly = self.mt_ext.verify(
                         transcript,
                         round_comm,
                         index,
@@ -550,7 +551,7 @@ impl<
             indicies
                 .iter()
                 .map(|&index| {
-                    let local_poly = self.comm.verify(
+                    let local_poly = self.mt.verify(
                         transcript,
                         comm,
                         index,
