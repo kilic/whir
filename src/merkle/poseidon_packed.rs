@@ -171,14 +171,16 @@ where
                 let node = unpacked[sibling_index % F::Packing::WIDTH];
 
                 #[cfg(debug_assertions)]
-                if i == 0 {
-                    let sibling = data
-                        .data
-                        .row(sibling_index)
-                        .unwrap()
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                    assert_eq!(self.hasher.hash_iter(Ext::flatten_to_base(sibling)), node);
+                {
+                    if i == 0 {
+                        let sibling = data
+                            .data
+                            .row(sibling_index)
+                            .unwrap()
+                            .into_iter()
+                            .collect::<Vec<_>>();
+                        assert_eq!(self.hasher.hash_iter(Ext::flatten_to_base(sibling)), node);
+                    }
                     witness.push(node);
                 }
 

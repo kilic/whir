@@ -394,7 +394,7 @@ mod test {
     }
 
     #[test]
-    // #[ignore]
+    #[ignore]
     fn whir_bench() {
         crate::test::init_tracing();
         run_whir_poseidon(25, 5, 1, 3, SecurityAssumption::CapacityBound, 90, 1);
