@@ -361,7 +361,9 @@ impl<
             let layer0 = tracing::info_span!("leaf_hash").in_scope(|| {
                 data.par_row_chunks_exact(F::Packing::WIDTH)
                     .map(|chunk| {
-                        let flat = Ext::flatten_to_base(chunk.values.to_vec()); // TODO: consider going unsafe transmute
+                        // TODO: consider going unsafe transmute
+                        // TODO: try extension field packing
+                        let flat = Ext::flatten_to_base(chunk.values.to_vec());
                         let width = flat.len() / F::Packing::WIDTH;
                         let chunk = RowMajorMatrix::new(flat, width);
                         let chunk = chunk.transpose();
