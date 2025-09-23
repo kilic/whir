@@ -47,15 +47,133 @@ mod test {
         },
     };
     use p3_challenger::DuplexChallenger;
-    use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
+    use p3_dft::{Radix2DFTSmallBatch, TwoAdicSubgroupDft};
     use p3_field::{extension::BinomialExtensionField, ExtensionField, Field, TwoAdicField};
     use p3_koala_bear::Poseidon2KoalaBear;
-    use p3_matrix::{dense::RowMajorMatrix, Matrix};
+    use p3_matrix::dense::RowMajorMatrixView;
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-    use rand::{
-        distr::{Distribution, StandardUniform},
-        Rng,
-    };
+    use rand::distr::{Distribution, StandardUniform};
+
+    #[test]
+    fn test_simple_whir_select() {
+        type F = p3_goldilocks::Goldilocks;
+        use p3_field::PrimeCharacteristicRing;
+        use p3_field::TwoAdicField;
+
+        pub fn encode<F: TwoAdicField>(
+            poly: &Poly<F, Eval>,
+            rate: usize,
+            folding: usize,
+        ) -> Poly<F, Eval> {
+            let width = 1 << (poly.k() - folding);
+            let mut mat = RowMajorMatrixView::new(poly, width).transpose();
+            mat.pad_to_height(1 << (poly.k() + rate - folding), F::ZERO);
+            Radix2DFTSmallBatch::<F>::default()
+                .dft_batch(mat)
+                .transpose()
+                .values
+                .into()
+        }
+
+        fn fold<F: TwoAdicField>(r: &Point<F>, evals: &Poly<F, Eval>) -> Poly<F, Eval> {
+            let mut evals = evals.clone();
+            r.iter().for_each(|&r| evals.fix_var_mut(r));
+            evals
+        }
+
+        let mut rng = &mut crate::test::rng(1);
+
+        let k = 7usize;
+        let f0 = Poly::<F, Eval>::rand(&mut rng, k);
+
+        for folding in 0..k {
+            for rate in 0..k {
+                let alpha = Point::<F>::rand(&mut rng, folding);
+
+                let f0_cw = encode(&f0, rate, folding);
+                let f1 = fold(&alpha, &f0);
+                let f1_cw = fold(&alpha, &f0_cw);
+
+                assert_eq!(f1_cw, encode(&f1, rate, 0));
+
+                let k_domain = f1_cw.k();
+                assert_eq!(k_domain, k + rate - folding);
+                let omega = F::two_adic_generator(k_domain);
+
+                for i in 0..1 << k_domain {
+                    let z = omega.exp_u64(i as u64);
+                    let y0 = f1_cw[i];
+                    let y1 = f1.iter().zip(z.powers()).map(|(&g, s)| g * s).sum::<F>();
+                    assert_eq!(y0, y1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_simple_whir_eq() {
+        type F = p3_goldilocks::Goldilocks;
+        use p3_field::PrimeCharacteristicRing;
+        use p3_field::TwoAdicField;
+
+        pub fn encode<F: TwoAdicField>(
+            poly: &Poly<F, Coeff>,
+            rate: usize,
+            folding: usize,
+        ) -> Poly<F, Coeff> {
+            let width = 1 << (poly.k() - folding);
+            let mut mat = RowMajorMatrixView::new(poly, width).transpose();
+            mat.pad_to_height(1 << (poly.k() + rate - folding), F::ZERO);
+            Radix2DFTSmallBatch::<F>::default()
+                .dft_batch(mat)
+                .transpose()
+                .values
+                .into()
+        }
+
+        fn fold_evals<F: TwoAdicField>(r: &Point<F>, mut evals: Poly<F, Eval>) -> Poly<F, Eval> {
+            r.iter().for_each(|&r| evals.fix_var_mut(r));
+            evals
+        }
+
+        fn fold_coeffs<F: Field>(r: &Point<F>, mut cw: Poly<F, Coeff>) -> Poly<F, Coeff> {
+            r.iter().for_each(|&r| cw.fix_var_mut(r));
+            cw
+        }
+
+        let mut rng = &mut crate::test::rng(1);
+
+        let k = 7usize;
+        let f0_coeffs = Poly::<F, Coeff>::rand(&mut rng, k);
+
+        for folding in 0..k {
+            for rate in 0..k {
+                let alpha = Point::<F>::rand(&mut rng, folding);
+
+                let f0 = f0_coeffs.clone().to_evals();
+                let f0_cw = encode(&f0_coeffs, rate, folding);
+
+                let f1 = fold_evals(&alpha, f0);
+                let f1_coeffs = f1.clone().to_coeffs();
+
+                let f1_cw = fold_coeffs(&alpha, f0_cw);
+                assert_eq!(f1_cw, encode(&f1_coeffs, rate, 0));
+
+                let k_domain = f1_cw.k();
+                assert_eq!(k_domain, k + rate - folding);
+                let omega = F::two_adic_generator(k_domain);
+
+                for i in 0..1 {
+                    let z = omega.exp_u64(i as u64);
+                    let powz = Point::<F>::expand(f1.k(), z);
+
+                    let y = f1_cw[i];
+                    assert_eq!(y, f1.eval(&powz));
+                    assert_eq!(y, f1_coeffs.eval_univariate(z));
+                }
+            }
+        }
+    }
 
     pub(crate) fn make_claims_ext<
         Transcript,
@@ -134,71 +252,6 @@ mod test {
                 Ok(Claim::new(point, eval))
             })
             .collect::<Result<Vec<_>, _>>()
-    }
-
-    #[test]
-    fn test_final_folding() {
-        type F = p3_goldilocks::Goldilocks;
-        use p3_field::PrimeCharacteristicRing;
-        use p3_field::TwoAdicField;
-
-        let k = 7usize;
-        let mut rng = &mut crate::test::rng(1);
-        let poly_in_coeffs: Poly<F, Coeff> = Poly::rand(&mut rng, k);
-        let poly_in_evals = poly_in_coeffs.clone().to_evals();
-        let size = 1 << k;
-
-        for folding in 0..k {
-            let width = 1 << folding;
-
-            // rearrange coefficients since variables are fixed in backwards order
-            let mut transposed = vec![F::ZERO; size];
-            transpose::transpose(&poly_in_coeffs, &mut transposed, size / width, width);
-
-            for extend in 0..5 {
-                let rate = k + extend;
-
-                // pad as rate
-                let pad_size = 1 << rate;
-                let mut padded: Vec<F> = crate::utils::unsafe_allocate_zero_vec(pad_size);
-                padded[..poly_in_coeffs.len()].copy_from_slice(&transposed);
-
-                // encode and find the codeword that would be committed to
-                let codeword = Radix2DitParallel::default()
-                    .dft_algebra_batch(RowMajorMatrix::new(padded, width));
-
-                // simulate sumcheck folding
-                let mut poly_in_evals = poly_in_evals.clone();
-                let rs: Point<F> = (0..folding)
-                    .map(|_| {
-                        let r: F = rng.random();
-                        poly_in_evals.fix_var(r);
-                        r
-                    })
-                    .collect::<Vec<_>>()
-                    .into();
-
-                // poly to send to verifier
-                let poly_in_coeffs = poly_in_evals.to_coeffs();
-
-                // find the domain generator
-                let domain_size = rate - folding;
-                let omega = F::two_adic_generator(domain_size);
-
-                // check for each index
-                for (index, row) in codeword.rows().enumerate() {
-                    let wi = omega.exp_u64(index as u64);
-                    let point = Point::<F>::expand(poly_in_coeffs.k(), wi);
-                    let e0 = poly_in_coeffs.eval(&point);
-                    let e1 = poly_in_coeffs.eval_univariate(wi);
-                    assert_eq!(e0, e1);
-
-                    let row: Poly<F, Coeff> = row.collect::<Vec<_>>().into();
-                    let e1 = row.eval(&rs.reversed());
-                    assert_eq!(e0, e1);
-                }
-            }
-        }
     }
 
     fn run_whir_rust_crypto<
