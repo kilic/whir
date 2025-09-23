@@ -26,24 +26,15 @@ impl<F: Field> std::ops::DerefMut for Point<F> {
     }
 }
 
-impl<F: Field> From<Vec<F>> for Point<F> {
-    fn from(v: Vec<F>) -> Self {
-        Self(v)
-    }
-}
-
-impl<'a, F: Field> From<&'a [F]> for Point<F>
-where
-    F: Clone,
-{
-    fn from(v: &'a [F]) -> Self {
-        Self(v.to_vec())
+impl<F: Field, I: IntoIterator<Item = F>> From<I> for Point<F> {
+    fn from(values: I) -> Self {
+        Self::new(values.into_iter().collect::<Vec<_>>())
     }
 }
 
 impl<F: Field> Point<F> {
-    pub fn new(zs: &[F]) -> Self {
-        zs.into()
+    pub fn new(zs: Vec<F>) -> Self {
+        Self(zs)
     }
 
     pub fn rand<R: rand::Rng>(rng: &mut R, k: usize) -> Self
@@ -55,7 +46,7 @@ impl<F: Field> Point<F> {
 
     pub fn split_at(&self, mid: usize) -> (Self, Self) {
         let (left, right) = self.0.split_at(mid);
-        (left.into(), right.into())
+        (left.to_vec().into(), right.to_vec().into())
     }
 
     pub fn expand(k: usize, mut var: F) -> Self {
@@ -132,20 +123,20 @@ impl<F: Field> Point<F> {
         let k = poly.k();
         assert_eq!(k, self.len());
 
-        let mut bss = unsafe_allocate_zero_vec(1 << (k - 1));
-        bss[0] = F::ONE;
+        let mut buf = unsafe_allocate_zero_vec(1 << (k - 1));
+        buf[0] = F::ONE;
         let mut sum = (*poly.first().unwrap()).into();
         for (i, &zi) in self.iter().enumerate() {
-            sum += bss
+            sum += buf
                 .par_iter()
-                .zip(poly.par_iter().skip(1 << (i)))
-                .take(1 << (i))
+                .zip(poly.par_iter().skip(1 << i))
+                .take(1 << i)
                 .map(|(&u0, &u1)| u0 * u1)
                 .sum::<F>()
                 * zi;
-            let (eqlo, eqhi) = bss.split_at_mut(1 << i);
-            eqlo.par_iter_mut()
-                .zip(eqhi.par_iter_mut())
+            let (lo, hi) = buf.split_at_mut(1 << i);
+            lo.par_iter_mut()
+                .zip(hi.par_iter_mut())
                 .for_each(|(lo, hi)| *hi = *lo * zi);
         }
         sum
@@ -170,6 +161,22 @@ impl<F: Field> Point<F> {
         }
         eq.into()
     }
+}
+
+pub fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Point<Ext>) -> Ext {
+    assert_eq!(x.len(), y.len());
+    x.par_iter()
+        .zip(y.par_iter())
+        .map(|(&xi, &yi)| (yi * xi).double() - xi - yi + F::ONE)
+        .product()
+}
+
+pub fn eval_select_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Point<Ext>) -> Ext {
+    assert_eq!(x.len(), y.len());
+    x.par_iter()
+        .zip(y.par_iter())
+        .map(|(&xi, &yi)| (yi * xi) - yi + F::ONE)
+        .product()
 }
 
 pub trait Basis: Default {}
@@ -202,21 +209,9 @@ impl<F, Basis> std::ops::DerefMut for Poly<F, Basis> {
     }
 }
 
-impl<F: Field, B: Basis> From<Vec<F>> for Poly<F, B> {
-    fn from(values: Vec<F>) -> Self {
-        Self::new(values)
-    }
-}
-
-impl<F: Field, B: Basis> From<&[F]> for Poly<F, B> {
-    fn from(values: &[F]) -> Self {
-        Self::new(values.to_vec())
-    }
-}
-
-impl<F: Field, B: Basis> From<&Vec<F>> for Poly<F, B> {
-    fn from(values: &Vec<F>) -> Self {
-        Self::new(values.clone())
+impl<F: Field, B: Basis, I: IntoIterator<Item = F>> From<I> for Poly<F, B> {
+    fn from(values: I) -> Self {
+        Self::new(values.into_iter().collect::<Vec<_>>())
     }
 }
 
@@ -258,10 +253,6 @@ impl<F: Field, B: Basis> Poly<F, B> {
 }
 
 impl<F: Field> Poly<F, Coeff> {
-    pub fn eval<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
-        point.eval_poly_in_coeffs(self)
-    }
-
     pub fn to_evals(mut self) -> Poly<F, Eval> {
         self.par_chunks_mut(2)
             .for_each(|chunk| chunk[1] += chunk[0]);
@@ -280,16 +271,34 @@ impl<F: Field> Poly<F, Coeff> {
         }
     }
 
+    pub fn eval<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
+        point.eval_poly_in_coeffs(self)
+    }
+
     pub fn eval_univariate<Ext: ExtensionField<F>>(&self, point: Ext) -> Ext {
         crate::utils::par_horner(&self.values, point)
+    }
+
+    pub fn fix_var_mut(&mut self, zi: F) {
+        let mid = self.len() / 2;
+        let (p0, p1) = self.split_at_mut(mid);
+        p0.par_iter_mut()
+            .zip(p1.par_iter())
+            .for_each(|(a0, &a1)| *a0 += zi * a1);
+        self.truncate(mid);
+    }
+
+    pub fn fix_var<Ext: ExtensionField<F>>(&self, zi: Ext) -> Poly<Ext, Coeff> {
+        let (p0, p1) = self.split_at(self.len() / 2);
+        p0.par_iter()
+            .zip(p1.par_iter())
+            .map(|(&a0, &a1)| zi * a1 + a0)
+            .collect::<Vec<_>>()
+            .into()
     }
 }
 
 impl<F: Field> Poly<F, Eval> {
-    pub fn eval<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
-        point.eval_poly_in_evals(self)
-    }
-
     pub fn to_coeffs(mut self) -> Poly<F, Coeff> {
         self.par_chunks_mut(2)
             .for_each(|chunk| chunk[1] -= chunk[0]);
@@ -308,22 +317,25 @@ impl<F: Field> Poly<F, Eval> {
         }
     }
 
+    pub fn eval<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
+        point.eval_poly_in_evals(self)
+    }
+
     pub fn eval_univariate<Ext: ExtensionField<F>>(&self, point: Ext) -> Ext {
         crate::utils::par_horner(&self.values, point)
     }
 
-    pub fn fix_var(&mut self, zi: F) {
+    pub fn fix_var_mut(&mut self, zi: F) {
         let mid = self.len() / 2;
         let (p0, p1) = self.split_at_mut(mid);
         p0.par_iter_mut()
             .zip(p1.par_iter())
-            .for_each(|(a0, a1)| *a0 += zi * (*a1 - *a0));
+            .for_each(|(a0, &a1)| *a0 += zi * (a1 - *a0));
         self.truncate(mid);
     }
 
-    pub fn fix_var_ext<Ext: ExtensionField<F>>(&self, zi: Ext) -> Poly<Ext, Eval> {
-        let mid = self.len() / 2;
-        let (p0, p1) = self.split_at(mid);
+    pub fn fix_var<Ext: ExtensionField<F>>(&self, zi: Ext) -> Poly<Ext, Eval> {
+        let (p0, p1) = self.split_at(self.len() / 2);
         p0.par_iter()
             .zip(p1.par_iter())
             .map(|(&a0, &a1)| zi * (a1 - a0) + a0)
@@ -334,66 +346,136 @@ impl<F: Field> Poly<F, Eval> {
 
 #[cfg(test)]
 mod test {
-    use crate::poly::{Coeff, Eval, Point, Poly};
-    use p3_baby_bear::BabyBear;
+
+    use crate::poly::{Eval, Point, Poly};
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
     use p3_field::extension::BinomialExtensionField;
-
-    type F = BabyBear;
-    type Ext = BinomialExtensionField<F, 4>;
-    use p3_field::PrimeCharacteristicRing;
+    use p3_field::{Field, PrimeCharacteristicRing};
     use p3_matrix::dense::RowMajorMatrix;
     use rand::Rng;
+
+    type F = p3_koala_bear::KoalaBear;
+    type Ext = BinomialExtensionField<F, 4>;
+
+    #[test]
+    #[ignore]
+    fn test_bench_eval() {
+        let mut rng = crate::test::rng(1);
+        let k = 25;
+        let poly0 = Poly::<F, Eval>::rand(&mut rng, k);
+        let poly1 = poly0.clone().to_coeffs();
+
+        let point = Point::<F>::rand(&mut rng, k);
+
+        crate::test::init_tracing();
+        let e0 = tracing::info_span!("e0").in_scope(|| poly0.eval(&point));
+        let e1 = tracing::info_span!("e1").in_scope(|| poly1.eval(&point));
+        assert_eq!(e0, e1);
+    }
+
+    #[test]
+    fn test_eq() {
+        let mut rng = &mut crate::test::rng(1);
+        let k = 3usize;
+
+        let x = Point::<F>::rand(&mut rng, k);
+        let y = Point::<Ext>::rand(&mut rng, k);
+        let e0 = super::eval_eq_xy(&x, &y);
+
+        let eq = x.eq(F::ONE);
+        let e1 = eq.eval(&y);
+        assert_eq!(e0, e1);
+    }
+
+    #[test]
+    fn test_select_eval() {
+        pub fn select<F: Field>(z: F, k: usize) -> Poly<F, Eval> {
+            z.powers().take(1 << k).collect().into()
+        }
+
+        let mut rng = &mut crate::test::rng(1);
+        let k = 11usize;
+
+        let var: Ext = rng.random();
+        let poly = select(var, k);
+        let x = Point::expand(k, var);
+        let y = Point::<Ext>::rand(&mut rng, k);
+        let e0 = super::eval_select_xy(&x, &y);
+        let e1 = poly.eval(&y);
+        assert_eq!(e0, e1);
+    }
 
     #[test]
     fn test_eval() {
         let mut rng = crate::test::rng(1);
-        let k = 5;
-        let poly0 = Poly::<F, Eval>::rand(&mut rng, k);
-        let poly1 = poly0.clone().to_coeffs();
-        let poly2 = poly1.clone().to_evals();
-        assert_eq!(poly0, poly2);
-        for i in 0..(1 << k) {
-            let e0 = poly0[i];
 
-            let point = Point::<F>::hypercube(i, k);
-            let e1 = point.eval_poly_in_evals(&poly0);
-            assert_eq!(e0, e1);
-            let e1 = point.eval_poly_in_coeffs(&poly1);
-            assert_eq!(e0, e1);
-            let mut poly2 = poly0.clone();
-            point.iter().rev().for_each(|&var| poly2.fix_var(var));
-            let e1 = poly2.constant().unwrap();
-            assert_eq!(e0, e1);
-        }
+        for k in 1..10 {
+            let poly_in_evals = Poly::<F, Eval>::rand(&mut rng, k);
+            let poly_in_coeffs = poly_in_evals.clone().to_coeffs();
+            assert_eq!(poly_in_evals, poly_in_coeffs.clone().to_evals());
 
-        for _ in 0..1000 {
+            for i in 0..(1 << k) {
+                let e0 = poly_in_evals[i];
+                let point = Point::<F>::hypercube(i, k);
+                assert_eq!(e0, poly_in_coeffs.eval(&point));
+                assert_eq!(e0, poly_in_evals.eval(&point));
+
+                {
+                    let mut poly = poly_in_evals.clone();
+                    point.iter().rev().for_each(|&var| poly.fix_var_mut(var));
+                    let e1 = poly.constant().unwrap();
+                    assert_eq!(e0, e1);
+                }
+
+                {
+                    let mut poly = poly_in_coeffs.clone();
+                    point.iter().rev().for_each(|&var| poly.fix_var_mut(var));
+                    let e1 = poly.constant().unwrap();
+                    assert_eq!(e0, e1);
+                }
+            }
+
             let point = Point::<Ext>::rand(&mut rng, k);
-            let e0 = point.eval_poly_in_evals(&poly0);
-            let e1 = point.eval_poly_in_coeffs(&poly1);
-            assert_eq!(e0, e1);
+            let e0 = poly_in_coeffs.eval(&point);
+            assert_eq!(e0, poly_in_evals.eval(&point));
 
-            let mut poly2 = poly0.fix_var_ext(*point.last().unwrap());
-            point
-                .iter()
-                .rev()
-                .skip(1)
-                .for_each(|&var| poly2.fix_var(var));
+            {
+                let mut poly = poly_in_evals.fix_var(*point.last().unwrap());
+                point
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .for_each(|&var| poly.fix_var_mut(var));
 
-            let e1 = poly2.constant().unwrap();
-            assert_eq!(e0, e1);
-            let e1 = poly0
-                .iter()
-                .zip(point.eq(Ext::ONE).iter())
-                .map(|(&coeff, &eq)| eq * coeff)
-                .sum::<Ext>();
-            assert_eq!(e0, e1);
+                let e1 = poly.constant().unwrap();
+                assert_eq!(e0, e1);
+            }
+
+            {
+                let mut poly = poly_in_coeffs.fix_var(*point.last().unwrap());
+                point
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .for_each(|&var| poly.fix_var_mut(var));
+
+                let e1 = poly.constant().unwrap();
+                assert_eq!(e0, e1);
+            }
+
+            {
+                let e1 = poly_in_evals
+                    .iter()
+                    .zip(point.eq(Ext::ONE).iter())
+                    .map(|(&coeff, &eq)| eq * coeff)
+                    .sum::<Ext>();
+                assert_eq!(e0, e1);
+            }
         }
     }
 
     #[test]
     fn test_domain() {
-        type F = p3_goldilocks::Goldilocks;
         use p3_field::TwoAdicField;
 
         let mut rng = &mut crate::test::rng(1);
@@ -414,12 +496,10 @@ mod test {
         let cw = &cw.values;
 
         let omega = F::two_adic_generator(rate);
-
         cw.iter().enumerate().for_each(|(i, &cw_i)| {
             let wi = omega.exp_u64(i as u64);
             let ei = poly.eval_univariate(wi);
             assert_eq!(ei, cw_i);
-
             let point = Point::<F>::expand(poly.k(), wi);
             let u0 = poly.eval(&point);
             let u1 = poly_in_coeffs.eval_univariate::<F>(wi);
@@ -429,30 +509,14 @@ mod test {
 
     #[test]
     fn test_univariate() {
-        type F = p3_goldilocks::Goldilocks;
-
         let mut rng = &mut crate::test::rng(1);
-        let k = 4usize;
-
-        for _ in 0..1000 {
+        for k in 1..10 {
             let poly_in_evals: Poly<F, Eval> = Poly::rand(&mut rng, k);
             let poly_in_coeffs = poly_in_evals.clone().to_coeffs();
             let r: F = rng.random();
             let point = Point::<F>::expand(poly_in_coeffs.k(), r);
             let e0 = poly_in_evals.eval(&point);
             let e1 = poly_in_coeffs.eval(&point);
-            assert_eq!(e0, e1);
-            let e1 = poly_in_coeffs.eval_univariate(r);
-            assert_eq!(e0, e1);
-        }
-
-        for _ in 0..1000 {
-            let poly_in_coeffs: Poly<F, Coeff> = Poly::rand(&mut rng, k);
-            let poly_in_evals = poly_in_coeffs.clone().to_evals();
-            let r: F = rng.random();
-            let point = Point::<F>::expand(poly_in_evals.k(), r);
-            let e0 = poly_in_coeffs.eval(&point);
-            let e1 = poly_in_evals.eval(&point);
             assert_eq!(e0, e1);
             let e1 = poly_in_coeffs.eval_univariate(r);
             assert_eq!(e0, e1);

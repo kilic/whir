@@ -66,7 +66,7 @@ where
     let round_poly = vec![v0, *sum - v0, v2];
     let r = Challenge::<F, Ex1>::draw(transcript);
     *sum = extrapolate(&round_poly, r);
-    eq.fix_var(r);
+    eq.fix_var_mut(r);
     Ok(r)
 }
 
@@ -124,7 +124,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         // first round
         let r = round(transcript, &mut sum, poly, &mut eq)?;
         // fix the first variable and get fixed new polynomial in extension field
-        let mut poly = poly.fix_var_ext(r);
+        let mut poly = poly.fix_var(r);
         let mut rs: Point<Ext> = vec![r].into();
 
         #[cfg(debug_assertions)]
@@ -140,7 +140,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         (1..d).try_for_each(|_| {
             let r = round::<_, F, Ext, Ext>(transcript, &mut sum, &poly, &mut eq)?;
             // fix the next variable using same space
-            poly.fix_var(r);
+            poly.fix_var_mut(r);
             rs.push(r);
 
             #[cfg(debug_assertions)]
@@ -200,7 +200,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
             .map(|_| {
                 let r =
                     round::<_, F, Ext, Ext>(transcript, &mut self.sum, &self.poly, &mut self.eq)?;
-                self.poly.fix_var(r);
+                self.poly.fix_var_mut(r);
                 Ok(r)
             })
             .collect::<Result<Vec<_>, _>>()?;
