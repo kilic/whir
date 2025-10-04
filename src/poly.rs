@@ -1,6 +1,7 @@
 use crate::utils::{log2_strict, n_rand, unsafe_allocate_zero_vec, TwoAdicSlice};
 use itertools::Itertools;
 use p3_field::{ExtensionField, Field};
+use p3_matrix::{dense::DenseMatrix, util::reverse_matrix_index_bits};
 use rand::distr::{Distribution, StandardUniform};
 use rayon::{
     iter::{
@@ -9,6 +10,22 @@ use rayon::{
     },
     slice::{ParallelSlice, ParallelSliceMut},
 };
+
+pub(crate) fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Point<Ext>) -> Ext {
+    assert_eq!(x.len(), y.len());
+    x.par_iter()
+        .zip(y.par_iter())
+        .map(|(&xi, &yi)| (yi * xi).double() - xi - yi + F::ONE)
+        .product()
+}
+
+pub(crate) fn eval_pow_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Point<Ext>) -> Ext {
+    assert_eq!(x.len(), y.len());
+    x.par_iter()
+        .zip(y.par_iter())
+        .map(|(&xi, &yi)| (yi * xi) - yi + F::ONE)
+        .product()
+}
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Point<F: Field>(pub Vec<F>);
@@ -163,22 +180,6 @@ impl<F: Field> Point<F> {
     }
 }
 
-pub fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Point<Ext>) -> Ext {
-    assert_eq!(x.len(), y.len());
-    x.par_iter()
-        .zip(y.par_iter())
-        .map(|(&xi, &yi)| (yi * xi).double() - xi - yi + F::ONE)
-        .product()
-}
-
-pub fn eval_select_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Point<Ext>) -> Ext {
-    assert_eq!(x.len(), y.len());
-    x.par_iter()
-        .zip(y.par_iter())
-        .map(|(&xi, &yi)| (yi * xi) - yi + F::ONE)
-        .product()
-}
-
 pub trait Basis: Default {}
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
@@ -249,6 +250,12 @@ impl<F: Field, B: Basis> Poly<F, B> {
 
     pub fn values(&self) -> &[F] {
         &self.values
+    }
+
+    pub fn reverse_index_bits(self) -> Self {
+        let mut mat = DenseMatrix::new(self.values, 1);
+        reverse_matrix_index_bits(&mut mat);
+        mat.values.into()
     }
 }
 
@@ -350,7 +357,7 @@ mod test {
     use crate::poly::{Eval, Point, Poly};
     use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
     use p3_field::extension::BinomialExtensionField;
-    use p3_field::{Field, PrimeCharacteristicRing};
+    use p3_field::PrimeCharacteristicRing;
     use p3_matrix::dense::RowMajorMatrix;
     use rand::Rng;
 
@@ -365,44 +372,28 @@ mod test {
         let poly0 = Poly::<F, Eval>::rand(&mut rng, k);
         let poly1 = poly0.clone().to_coeffs();
 
-        let point = Point::<F>::rand(&mut rng, k);
+        let var: F = rng.random();
+        let point = Point::<F>::expand(k, var);
 
         crate::test::init_tracing();
         let e0 = tracing::info_span!("e0").in_scope(|| poly0.eval(&point));
         let e1 = tracing::info_span!("e1").in_scope(|| poly1.eval(&point));
+        assert_eq!(e0, e1);
+        let e1 = tracing::info_span!("e1").in_scope(|| poly1.eval_univariate(var));
         assert_eq!(e0, e1);
     }
 
     #[test]
     fn test_eq() {
         let mut rng = &mut crate::test::rng(1);
-        let k = 3usize;
-
-        let x = Point::<F>::rand(&mut rng, k);
-        let y = Point::<Ext>::rand(&mut rng, k);
-        let e0 = super::eval_eq_xy(&x, &y);
-
-        let eq = x.eq(F::ONE);
-        let e1 = eq.eval(&y);
-        assert_eq!(e0, e1);
-    }
-
-    #[test]
-    fn test_select_eval() {
-        pub fn select<F: Field>(z: F, k: usize) -> Poly<F, Eval> {
-            z.powers().take(1 << k).collect().into()
+        for k in 1..10 {
+            let x = Point::<F>::rand(&mut rng, k);
+            let y = Point::<Ext>::rand(&mut rng, k);
+            let e0 = super::eval_eq_xy(&x, &y);
+            let eq = x.eq(F::ONE);
+            let e1 = eq.eval(&y);
+            assert_eq!(e0, e1);
         }
-
-        let mut rng = &mut crate::test::rng(1);
-        let k = 11usize;
-
-        let var: Ext = rng.random();
-        let poly = select(var, k);
-        let x = Point::expand(k, var);
-        let y = Point::<Ext>::rand(&mut rng, k);
-        let e0 = super::eval_select_xy(&x, &y);
-        let e1 = poly.eval(&y);
-        assert_eq!(e0, e1);
     }
 
     #[test]
@@ -505,21 +496,5 @@ mod test {
             let u1 = poly_in_coeffs.eval_univariate::<F>(wi);
             assert_eq!(u0, u1);
         });
-    }
-
-    #[test]
-    fn test_univariate() {
-        let mut rng = &mut crate::test::rng(1);
-        for k in 1..10 {
-            let poly_in_evals: Poly<F, Eval> = Poly::rand(&mut rng, k);
-            let poly_in_coeffs = poly_in_evals.clone().to_coeffs();
-            let r: F = rng.random();
-            let point = Point::<F>::expand(poly_in_coeffs.k(), r);
-            let e0 = poly_in_evals.eval(&point);
-            let e1 = poly_in_coeffs.eval(&point);
-            assert_eq!(e0, e1);
-            let e1 = poly_in_coeffs.eval_univariate(r);
-            assert_eq!(e0, e1);
-        }
     }
 }

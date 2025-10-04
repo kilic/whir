@@ -1,22 +1,22 @@
 use itertools::Itertools;
 use p3_dft::{Radix2DFTSmallBatch, TwoAdicSubgroupDft};
 use p3_field::{ExtensionField, TwoAdicField};
-use p3_matrix::dense::RowMajorMatrix;
+use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::Matrix;
-use transpose::transpose;
 
 use crate::{
     merkle::{MerkleData, MerkleTree, MerkleTreeExt},
     pcs::{
         params::{compute_number_of_rounds, SecurityAssumption},
         sumcheck::{Sumcheck, SumcheckVerifier},
-        Claim,
+        EqClaim, PowClaim,
     },
-    poly::{Coeff, Point, Poly},
+    poly::{Eval, Point, Poly},
     transcript::{Challenge, ChallengeBits, Reader, Writer},
-    utils::{unsafe_allocate_zero_vec, TwoAdicSlice},
+    utils::TwoAdicSlice,
 };
 
+#[tracing::instrument(skip_all)]
 pub fn commit_base<Transcript, F: TwoAdicField, MT: MerkleTree<F>>(
     transcript: &mut Transcript,
     poly: &[F],
@@ -27,17 +27,15 @@ pub fn commit_base<Transcript, F: TwoAdicField, MT: MerkleTree<F>>(
 where
     Transcript: Writer<<MT::MerkleData as MerkleData>::Digest>,
 {
-    // pad
-    let mut padded: Vec<F> = crate::utils::unsafe_allocate_zero_vec(1 << (poly.k() + rate));
-    padded[..poly.len()].copy_from_slice(poly);
-
-    // encode and commit
-    let mat = RowMajorMatrix::new(padded, 1 << folding);
+    let width = 1 << (poly.k() - folding);
+    let mut mat = RowMajorMatrixView::new(poly, width).transpose();
+    mat.pad_to_height(1 << (poly.k() + rate - folding), F::ZERO);
     let codeword = tracing::info_span!("dft-base", height = mat.height(), width = mat.width())
         .in_scope(|| Radix2DFTSmallBatch::<F>::default().dft_batch(mat));
     mt.commit(transcript, codeword)
 }
 
+#[tracing::instrument(skip_all)]
 pub fn commit_ext<Transcript, F: TwoAdicField, Ext: ExtensionField<F>, MT: MerkleTreeExt<F, Ext>>(
     transcript: &mut Transcript,
     poly: &[Ext],
@@ -48,12 +46,9 @@ pub fn commit_ext<Transcript, F: TwoAdicField, Ext: ExtensionField<F>, MT: Merkl
 where
     Transcript: Writer<<MT::MerkleData as MerkleData>::Digest>,
 {
-    // pad
-    let mut padded: Vec<Ext> = crate::utils::unsafe_allocate_zero_vec(1 << (poly.k() + rate));
-    padded[..poly.len()].copy_from_slice(poly);
-
-    // encode and commit
-    let mat = RowMajorMatrix::new(padded, 1 << folding);
+    let width = 1 << (poly.k() - folding);
+    let mut mat = RowMajorMatrixView::new(poly, width).transpose();
+    mat.pad_to_height(1 << (poly.k() + rate - folding), Ext::ZERO);
     let codeword = tracing::info_span!("dft-ext", h = mat.height(), w = mat.width())
         .in_scope(|| Radix2DFTSmallBatch::<F>::default().dft_algebra_batch(mat));
     mt.commit(transcript, codeword)
@@ -125,17 +120,13 @@ impl<
     pub fn commit<Transcript>(
         &self,
         transcript: &mut Transcript,
-        poly: &Poly<F, Coeff>,
+        poly: &Poly<F, Eval>,
     ) -> Result<MT::MerkleData, crate::Error>
     where
         Transcript:
             Writer<Ext> + Writer<<MT::MerkleData as MerkleData>::Digest> + Challenge<F, Ext>,
     {
-        let mut transposed = unsafe_allocate_zero_vec(poly.len());
-        let width = 1 << self.folding;
-        tracing::info_span!("transpose")
-            .in_scope(|| transpose::transpose(poly, &mut transposed, poly.len() / width, width));
-        commit_base(transcript, &transposed, self.rate, self.folding, &self.mt)
+        commit_base(transcript, poly, self.rate, self.folding, &self.mt)
     }
 
     fn n_ood_queries(&self, k: usize, rate: usize) -> usize {
@@ -168,9 +159,9 @@ impl<
     pub fn open<Transcript>(
         &self,
         transcript: &mut Transcript,
-        claims: Vec<Claim<Ext, Ext>>,
+        claims: Vec<EqClaim<Ext, Ext>>,
         comm_data: MT::MerkleData,
-        poly: Poly<F, Coeff>,
+        poly: Poly<F, Eval>,
     ) -> Result<(), crate::Error>
     where
         Transcript: Writer<F>
@@ -182,23 +173,16 @@ impl<
     {
         assert_eq!(poly.k(), self.k);
 
-        let n_ood_queries = self.n_ood_queries(self.k, self.rate);
-        // draw an univarite point
-        // evaluate poly at the point
-        // derive the multivariate point
-
-        // get the evaluation representation of the polynomial
-        let poly_in_evals = tracing::info_span!("to evals").in_scope(|| poly.to_evals());
-
         // generate out-of-domain claims
         let ood_claims = tracing::info_span!("ood claims").in_scope(|| {
+            let n_ood_queries = self.n_ood_queries(self.k, self.rate);
             (0..n_ood_queries)
                 .map(|_| {
                     let point: Ext = Challenge::draw(transcript);
-                    let point = Point::expand(poly_in_evals.k(), point);
-                    let eval = poly_in_evals.eval::<Ext>(&point);
+                    let point = Point::expand(poly.k(), point);
+                    let eval = poly.eval::<Ext>(&point);
                     transcript.write(eval)?;
-                    Ok(Claim::new(point, eval))
+                    Ok(EqClaim::new(point, eval))
                 })
                 .collect::<Result<Vec<_>, _>>()
         })?;
@@ -207,15 +191,14 @@ impl<
         let claims = itertools::chain!(claims, ood_claims).collect::<Vec<_>>();
 
         // draw sumcheck constraint combination challenge
-        let alpha: Ext = Challenge::draw(transcript);
+        let alpha = Challenge::draw(transcript);
         // initialize the sumcheck instance
         // `self.folding` number of rounds is run
-        let mut sumcheck = Sumcheck::new(transcript, self.folding, alpha, &claims, &poly_in_evals)?;
+        let mut sumcheck = Sumcheck::new(transcript, self.folding, alpha, &claims, &[], &poly)?;
 
         // derive number of rounds
         let (n_rounds, final_sumcheck_rounds) = compute_number_of_rounds(self.folding, self.k);
 
-        let width = 1 << self.folding;
         let mut round_data: Option<MTExt::MerkleData> = None;
         let mut round_point: Option<Point<Ext>> = None;
 
@@ -225,35 +208,27 @@ impl<
                 // derive round params
                 let (k_folded_domain, this_rate, prev_rate) = self.round_params(round);
 
-                // find the current polynomial in coefficient representation
-                let poly_in_coeffs = sumcheck.poly().clone().to_coeffs();
-
                 // commit to the polynomial in coefficient representation
                 let _round_data: MTExt::MerkleData = {
-                    // rearrange coefficients since variables are fixed in backwards order
-                    let mut transposed = unsafe_allocate_zero_vec(poly_in_coeffs.len());
-                    let height = poly_in_coeffs.len() / width;
-                    transpose(&poly_in_coeffs, &mut transposed, height, width);
-                    // encode and commit with the new rate
                     commit_ext::<_, F, Ext, _>(
                         transcript,
-                        &transposed,
+                        &sumcheck.poly,
                         this_rate,
                         self.folding,
                         &self.mt_ext,
                     )
                 }?;
 
-                // find ood claims
+                // generate out-of-domain claims
                 let ood_claims = tracing::info_span!("ood claims in round").in_scope(|| {
                     let n_ood_queries = self.n_ood_queries(sumcheck.k(), this_rate);
                     (0..n_ood_queries)
                         .map(|_| {
                             let point: Ext = Challenge::draw(transcript);
-                            let point = Point::expand(poly_in_coeffs.k(), point);
-                            let eval = sumcheck.poly().eval(&point);
+                            let point = Point::expand(sumcheck.k(), point);
+                            let eval = sumcheck.poly.eval(&point);
                             transcript.write(eval)?;
-                            Ok(Claim::new(point, eval))
+                            Ok(EqClaim::new(point, eval))
                         })
                         .collect::<Result<Vec<_>, _>>()
                 })?;
@@ -264,14 +239,13 @@ impl<
                 let indicies = stir_indicies(transcript, k_folded_domain, n_stir_queries);
 
                 let omega = F::two_adic_generator(k_folded_domain);
-                let points = indicies
+                let vars = indicies
                     .iter()
                     .map(|&index| omega.exp_u64(index as u64))
                     .collect::<Vec<_>>();
 
                 // find stir claims
-                let stir_claims = if round == 0 {
-                    let round_point = sumcheck.rs();
+                let stir_claims: Vec<PowClaim<F, Ext>> = if round == 0 {
                     let cw_local_polys = indicies
                         .iter()
                         .map(|&index| self.mt.query(transcript, index, &comm_data))
@@ -279,17 +253,14 @@ impl<
 
                     cw_local_polys
                         .iter()
-                        .zip(points.iter())
-                        .map(|(local_poly, &point)| {
-                            let eval = Poly::<_, Coeff>::new(local_poly.to_vec())
-                                .eval(&round_point.reversed());
-                            let poly = sumcheck.poly();
-                            let point = Point::expand(poly.k(), point);
+                        .zip(vars.iter())
+                        .map(|(local_poly, &var)| {
+                            let eval = Poly::<_, Eval>::new(local_poly.to_vec())
+                                .eval(&sumcheck.rs.reversed());
 
-                            #[cfg(debug_assertions)]
-                            assert_eq!(eval, sumcheck.poly().eval(&point.as_ext::<Ext>()));
+                            debug_assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
 
-                            Claim::new(point, eval)
+                            PowClaim::new(var, eval, sumcheck.k())
                         })
                         .collect::<Vec<_>>()
                 } else {
@@ -304,17 +275,14 @@ impl<
 
                     cw_local_polys
                         .iter()
-                        .zip(points.iter())
-                        .map(|(local_poly, &point)| {
-                            let eval = Poly::<_, Coeff>::new(local_poly.to_vec())
+                        .zip(vars.iter())
+                        .map(|(local_poly, &var)| {
+                            let eval = Poly::<_, Eval>::new(local_poly.to_vec())
                                 .eval(&round_point.reversed());
-                            let poly = sumcheck.poly();
-                            let point = Point::expand(poly.k(), point);
 
-                            #[cfg(debug_assertions)]
-                            assert_eq!(eval, sumcheck.poly().eval(&point.as_ext::<Ext>()));
+                            debug_assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
 
-                            Claim::new(point, eval)
+                            PowClaim::new(var, eval, sumcheck.k())
                         })
                         .collect::<Vec<_>>()
                 };
@@ -326,8 +294,10 @@ impl<
                     transcript,
                     self.folding,
                     alpha,
-                    &stir_claims,
+                    &[],
                     &ood_claims,
+                    &stir_claims,
+                    &[],
                 )?);
                 round_data = Some(_round_data);
                 Ok(())
@@ -335,10 +305,8 @@ impl<
         }
 
         tracing::info_span!("final").in_scope(|| {
-            // find final polynomial in coefficient representation
-            // and send it to the verifier
-            let poly_in_coeffs = sumcheck.poly().clone().to_coeffs();
-            transcript.write_many(&poly_in_coeffs)?;
+            // send final polynomial to the verifier
+            transcript.write_many(&sumcheck.poly)?;
 
             // derive round params
             let (k_folded_domain, _, prev_rate) = self.round_params(n_rounds);
@@ -350,27 +318,27 @@ impl<
 
             if let Some(round_data) = &round_data {
                 indicies.iter().try_for_each(|&index| {
-                    let _local_poly = self.mt_ext.query(transcript, index, round_data)?;
+                    let _cw_local_poly = self.mt_ext.query(transcript, index, round_data)?;
 
                     #[cfg(debug_assertions)]
                     {
-                        let point = F::two_adic_generator(k_folded_domain).exp_u64(index as u64);
+                        let var = F::two_adic_generator(k_folded_domain).exp_u64(index as u64);
                         let round_point = round_point.as_ref().unwrap().reversed();
-                        let eval = Poly::<_, Coeff>::new(_local_poly.to_vec()).eval(&round_point);
-                        assert_eq!(eval, poly_in_coeffs.eval_univariate(Ext::from(point)));
+                        let eval = Poly::<_, Eval>::new(_cw_local_poly.to_vec()).eval(&round_point);
+                        assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
                     }
                     Ok(())
                 })?;
             } else {
                 indicies.iter().try_for_each(|&index| {
-                    let _local_poly = self.mt.query(transcript, index, &comm_data)?;
+                    let _cw_local_poly = self.mt.query(transcript, index, &comm_data)?;
 
                     #[cfg(debug_assertions)]
                     {
-                        let point = F::two_adic_generator(k_folded_domain).exp_u64(index as u64);
-                        let round_point = sumcheck.rs().reversed();
-                        let eval = Poly::<_, Coeff>::new(_local_poly.to_vec()).eval(&round_point);
-                        assert_eq!(eval, poly_in_coeffs.eval_univariate(Ext::from(point)));
+                        let var = F::two_adic_generator(k_folded_domain).exp_u64(index as u64);
+                        let round_point = sumcheck.rs.reversed();
+                        let eval = Poly::<_, Eval>::new(_cw_local_poly.to_vec()).eval(&round_point);
+                        assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
                     }
 
                     Ok(())
@@ -386,7 +354,7 @@ impl<
     pub fn verify<Transcript>(
         &self,
         transcript: &mut Transcript,
-        claims: Vec<Claim<Ext, Ext>>,
+        claims: Vec<EqClaim<Ext, Ext>>,
         comm: <MT::MerkleData as MerkleData>::Digest,
     ) -> Result<(), crate::Error>
     where
@@ -404,7 +372,7 @@ impl<
                 let point: Ext = Challenge::draw(transcript);
                 let eval: Ext = transcript.read()?;
                 let point = Point::expand(self.k, point);
-                Ok(Claim::new(point, eval))
+                Ok(EqClaim::new(point, eval))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -418,7 +386,8 @@ impl<
         let alpha = Challenge::draw(transcript);
 
         // run first set of sumcheck rounds
-        let mut round_point = sumcheck.fold(transcript, self.folding, alpha, &[], &claims)?;
+        let mut round_point =
+            sumcheck.fold(transcript, self.folding, alpha, &[], &claims, &[], &[])?;
 
         // round commitment is used validate stir points in the next set of rounds
         let mut round_comm: Option<<MTExt::MerkleData as MerkleData>::Digest> = None;
@@ -433,13 +402,13 @@ impl<
             let _round_comm: <MTExt::MerkleData as MerkleData>::Digest = transcript.read()?;
 
             // read ood claims
-            let n_ood_queries = self.n_ood_queries(sumcheck.k(), this_rate);
+            let n_ood_queries = self.n_ood_queries(sumcheck.k, this_rate);
             let ood_claims = (0..n_ood_queries)
                 .map(|_| {
                     let point: Ext = Challenge::draw(transcript);
                     let eval: Ext = transcript.read()?;
-                    let point = Point::expand(sumcheck.k(), point);
-                    Ok(Claim::new(point, eval))
+                    let point = Point::expand(sumcheck.k, point);
+                    Ok(EqClaim::new(point, eval))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -464,11 +433,12 @@ impl<
                             k_folded_domain,
                         )?;
                         // derive the multivariate point from first variable
-                        let point = Point::expand(sumcheck.k(), omega.exp_u64(index as u64));
+                        let var = omega.exp_u64(index as u64);
+                        // let point = Point::expand(sumcheck.k, omega.exp_u64(index as u64));
                         // evaluate the local polynomial at the round point
                         // and return the claim for sumcheck
-                        let eval = Poly::<_, Coeff>::new(local_poly).eval(&round_point.reversed());
-                        Ok(Claim::new(point, eval))
+                        let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
+                        Ok(PowClaim::new(var, eval, sumcheck.k))
                     })
                     .collect::<Result<Vec<_>, _>>()
             } else {
@@ -485,11 +455,12 @@ impl<
                             k_folded_domain,
                         )?;
                         // derive the multivariate point from first variable
-                        let point = Point::expand(sumcheck.k(), omega.exp_u64(index as u64));
+                        let var = omega.exp_u64(index as u64);
+                        // let point = Point::expand(sumcheck.k, omega.exp_u64(index as u64));
                         // evaluate the local polynomial at the round point
                         // and return the claim for sumcheck
-                        let eval = Poly::<_, Coeff>::new(local_poly).eval(&round_point.reversed());
-                        Ok(Claim::new(point, eval))
+                        let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
+                        Ok(PowClaim::new(var, eval, sumcheck.k))
                     })
                     .collect::<Result<Vec<_>, _>>()
             }?;
@@ -500,13 +471,20 @@ impl<
             // draw the combination challenge
             let alpha = Challenge::draw(transcript);
             // run current set of sumcheck rounds
-            round_point =
-                sumcheck.fold(transcript, self.folding, alpha, &stir_claims, &ood_claims)?;
+            round_point = sumcheck.fold(
+                transcript,
+                self.folding,
+                alpha,
+                &[],
+                &ood_claims,
+                &stir_claims,
+                &[],
+            )?;
         }
 
         // read the final polynomial
-        assert_eq!(sumcheck.k(), final_sumcheck_rounds);
-        let poly_in_coeffs = Poly::<Ext, Coeff>::new(transcript.read_many(1 << sumcheck.k())?);
+        assert_eq!(sumcheck.k, final_sumcheck_rounds);
+        let final_poly = Poly::<Ext, Eval>::new(transcript.read_many(1 << sumcheck.k)?);
 
         // derive round params for the final set of rounds
         let (k_folded_domain, _, prev_rate) = self.round_params(n_rounds);
@@ -533,17 +511,17 @@ impl<
                     // derive the univariate point
                     let point = omega.exp_u64(index as u64);
                     // evaluate the local polynomial at the round point
-                    let eval = Poly::<_, Coeff>::new(local_poly).eval(&round_point.reversed());
+                    let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
 
                     // verify stir evaluations against final polynomial
-                    (eval == poly_in_coeffs.eval_univariate(Ext::from(point)))
+                    (eval == final_poly.eval_univariate(Ext::from(point)))
                         .then_some(())
                         .ok_or(crate::Error::Verify)?;
 
                     // derive the multivariate point from first variable
                     // and return the claim for sumcheck
-                    let point = Point::expand(sumcheck.k(), omega.exp_u64(index as u64));
-                    Ok(Claim::new(point, eval))
+                    let point = Point::expand(sumcheck.k, omega.exp_u64(index as u64));
+                    Ok(EqClaim::new(point, eval))
                 })
                 .collect::<Result<Vec<_>, _>>()
         } else {
@@ -561,21 +539,21 @@ impl<
                     // derive the univariate point
                     let point = omega.exp_u64(index as u64);
                     // evaluate the local polynomial at the round point
-                    let eval = Poly::<_, Coeff>::new(local_poly).eval(&round_point.reversed());
+                    let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
 
                     // verify stir evaluations against final polynomial
-                    (eval == poly_in_coeffs.eval_univariate(Ext::from(point)))
+                    (eval == final_poly.eval_univariate(Ext::from(point)))
                         .then_some(())
                         .ok_or(crate::Error::Verify)?;
 
                     // derive the multivariate point from first variable
                     // and return the claim for sumcheck
-                    let point = Point::expand(sumcheck.k(), omega.exp_u64(index as u64));
-                    Ok(Claim::new(point, eval))
+                    let point = Point::expand(sumcheck.k, omega.exp_u64(index as u64));
+                    Ok(EqClaim::new(point, eval))
                 })
                 .collect::<Result<Vec<_>, _>>()
         }?;
 
-        sumcheck.finalize(transcript, Some(poly_in_coeffs.clone().to_evals()))
+        sumcheck.finalize(transcript, Some(final_poly))
     }
 }
