@@ -491,67 +491,47 @@ impl<
 
         // derive number of stir queries
         let n_stir_queries = self.n_stir_queries(prev_rate);
-        // draw stir points
+        // draw stir indicies
         let indicies = stir_indicies(transcript, k_folded_domain, n_stir_queries);
 
         // get domain generator
         let omega = F::two_adic_generator(k_folded_domain);
         if let Some(round_comm) = round_comm {
             // stir points will be verified against the previous round commitment
-            indicies
-                .iter()
-                .map(|&index| {
-                    let local_poly = self.mt_ext.verify(
-                        transcript,
-                        round_comm,
-                        index,
-                        1 << self.folding,
-                        k_folded_domain,
-                    )?;
-                    // derive the univariate point
-                    let point = omega.exp_u64(index as u64);
-                    // evaluate the local polynomial at the round point
-                    let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
+            indicies.iter().try_for_each(|&index| {
+                let local_poly = self.mt_ext.verify(
+                    transcript,
+                    round_comm,
+                    index,
+                    1 << self.folding,
+                    k_folded_domain,
+                )?;
+                // derive the univariate point
+                let var = omega.exp_u64(index as u64);
+                // evaluate the local polynomial at the round point
+                let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
 
-                    // verify stir evaluations against final polynomial
-                    (eval == final_poly.eval_univariate(Ext::from(point)))
-                        .then_some(())
-                        .ok_or(crate::Error::Verify)?;
-
-                    // derive the multivariate point from first variable
-                    // and return the claim for sumcheck
-                    let point = Point::expand(sumcheck.k, omega.exp_u64(index as u64));
-                    Ok(EqClaim::new(point, eval))
-                })
-                .collect::<Result<Vec<_>, _>>()
+                // verify stir evaluations against final polynomial
+                (eval == final_poly.eval_univariate(Ext::from(var)))
+                    .then_some(())
+                    .ok_or(crate::Error::Verify)
+            })
         } else {
             // if there are no intermediate rounds stir points will be verified against the data commitment
-            indicies
-                .iter()
-                .map(|&index| {
-                    let local_poly = self.mt.verify(
-                        transcript,
-                        comm,
-                        index,
-                        1 << self.folding,
-                        k_folded_domain,
-                    )?;
-                    // derive the univariate point
-                    let point = omega.exp_u64(index as u64);
-                    // evaluate the local polynomial at the round point
-                    let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
+            indicies.iter().try_for_each(|&index| {
+                let local_poly =
+                    self.mt
+                        .verify(transcript, comm, index, 1 << self.folding, k_folded_domain)?;
+                // derive the univariate point
+                let var = omega.exp_u64(index as u64);
+                // evaluate the local polynomial at the round point
+                let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
 
-                    // verify stir evaluations against final polynomial
-                    (eval == final_poly.eval_univariate(Ext::from(point)))
-                        .then_some(())
-                        .ok_or(crate::Error::Verify)?;
-
-                    // derive the multivariate point from first variable
-                    // and return the claim for sumcheck
-                    let point = Point::expand(sumcheck.k, omega.exp_u64(index as u64));
-                    Ok(EqClaim::new(point, eval))
-                })
-                .collect::<Result<Vec<_>, _>>()
+                // verify stir evaluations against final polynomial
+                (eval == final_poly.eval_univariate(Ext::from(var)))
+                    .then_some(())
+                    .ok_or(crate::Error::Verify)
+            })
         }?;
 
         sumcheck.finalize(transcript, Some(final_poly))

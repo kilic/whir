@@ -370,12 +370,14 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
         Transcript: Reader<Ext>,
     {
         let poly = poly.map_or_else(|| Ok(Poly::new(transcript.read_many(1 << self.k)?)), Ok)?;
-        let eqs = self
+        let weigths = self
             .multi_rounds
             .iter()
             .map(|round| round.weights(&poly))
             .sum::<Ext>();
-        (self.sum == eqs).then_some(()).ok_or(crate::Error::Verify)
+        (self.sum == weigths)
+            .then_some(())
+            .ok_or(crate::Error::Verify)
     }
 }
 

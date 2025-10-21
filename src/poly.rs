@@ -61,6 +61,10 @@ impl<F: Field> Point<F> {
         Self(n_rand(rng, k))
     }
 
+    pub fn vars(&self) -> &[F] {
+        &self.0
+    }
+
     pub fn split_at(&self, mid: usize) -> (Self, Self) {
         let (left, right) = self.0.split_at(mid);
         (left.to_vec().into(), right.to_vec().into())

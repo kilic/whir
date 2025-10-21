@@ -237,20 +237,18 @@ mod test {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    pub(crate) fn make_pow_claims_base<Transcript, F: Field, Ex0: ExtensionField<F>>(
+    pub(crate) fn make_pow_claims_base<Transcript, F: Field, Ext: ExtensionField<F>>(
         transcript: &mut Transcript,
         n_points: usize,
-        poly: &Poly<Ex0, Eval>,
-    ) -> Result<Vec<PowClaim<F, Ex0>>, crate::Error>
+        poly: &Poly<Ext, Eval>,
+    ) -> Result<Vec<PowClaim<F, Ext>>, crate::Error>
     where
-        Transcript: Challenge<F, F> + Writer<Ex0>,
+        Transcript: Challenge<F, F> + Writer<Ext>,
     {
         let k = poly.k();
         (0..n_points)
             .map(|_| {
                 let var = transcript.draw();
-                // let point = Point::expand(k, var);
-                // let eval = poly.eval(&point.as_ext::<Ex0>());
                 let eval = poly
                     .iter()
                     .zip(var.powers().take(poly.len()))
