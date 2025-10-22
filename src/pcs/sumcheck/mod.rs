@@ -72,15 +72,12 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         self.poly.k()
     }
 
-    #[tracing::instrument(skip_all, fields(k = poly.k(), d = d, eq_base, eq_ext = eq_claims_ext.len(), pow_ext = pow_claims_ext.len()))]
+    #[tracing::instrument(skip_all, fields(k = poly.k(), d = d, eqs = eq_claims.len()))]
     pub fn new<Transcript>(
         transcript: &mut Transcript,
         d: usize,
         alpha: Ext,
-
-        eq_claims_ext: &[EqClaim<Ext, Ext>],
-        pow_claims_ext: &[PowClaim<Ext, Ext>],
-
+        eq_claims: &[EqClaim<Ext, Ext>],
         poly: &Poly<F>,
     ) -> Result<Self, crate::Error>
     where
@@ -93,14 +90,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
 
         let mut weights: Poly<Ext> = Poly::zero(k);
         let mut sum = Ext::ZERO;
-        compress_claims(
-            (&mut weights, &mut sum, false),
-            alpha,
-            &[],
-            eq_claims_ext,
-            &[],
-            pow_claims_ext,
-        );
+        compress_claims(&mut weights, &mut sum, alpha, eq_claims, &[]);
 
         // first round
         let r = round(transcript, &mut sum, poly, &mut weights)?;
@@ -139,28 +129,26 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         })
     }
 
-    #[tracing::instrument(skip_all, fields(k = self.k(), d = d, eq_base = eq_claims_base.len(),eq_ext = eq_claims_ext.len(),pow_base = pow_claims_base.len(),pow_ext = pow_claims_ext.len()))]
+    #[tracing::instrument(skip_all, fields(k = self.k(), d = d, eqs = eq_claims.len(), pows = pow_claims.len()))]
     #[allow(clippy::too_many_arguments)]
     pub fn fold<Transcript>(
         &mut self,
         transcript: &mut Transcript,
         d: usize,
         alpha: Ext,
-        eq_claims_base: &[EqClaim<F, Ext>],
-        eq_claims_ext: &[EqClaim<Ext, Ext>],
-        pow_claims_base: &[PowClaim<F, Ext>],
-        pow_claims_ext: &[PowClaim<Ext, Ext>],
+        eq_claims: &[EqClaim<Ext, Ext>],
+        pow_claims: &[PowClaim<F, Ext>],
     ) -> Result<Point<Ext>, crate::Error>
     where
         Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
     {
+        // contribute new claims
         compress_claims(
-            (&mut self.weights, &mut self.sum, true),
+            &mut self.weights,
+            &mut self.sum,
             alpha,
-            eq_claims_base,
-            eq_claims_ext,
-            pow_claims_base,
-            pow_claims_ext,
+            eq_claims,
+            pow_claims,
         );
 
         // run sumcheck rounds
@@ -187,28 +175,22 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
 
 #[derive(Debug, Clone)]
 struct MultiRound<F: Field, Ext: ExtensionField<F>> {
-    points_base: Vec<Point<F>>,
-    points_ext: Vec<Point<Ext>>,
-    vars_base: Vec<Point<F>>,
-    vars_ext: Vec<Point<Ext>>,
+    eq_points: Vec<Point<Ext>>,
+    pow_points: Vec<Point<F>>,
     rs: Point<Ext>,
     alpha: Ext,
 }
 
 impl<F: Field, Ext: ExtensionField<F>> MultiRound<F, Ext> {
     fn new(
-        points_base: Vec<Point<F>>,
-        points_ext: Vec<Point<Ext>>,
-        vars_base: Vec<Point<F>>,
-        vars_ext: Vec<Point<Ext>>,
+        eq_points: Vec<Point<Ext>>,
+        pow_points: Vec<Point<F>>,
         rs: Point<Ext>,
         alpha: Ext,
     ) -> Self {
         Self {
-            points_base,
-            points_ext,
-            vars_base,
-            vars_ext,
+            eq_points,
+            pow_points,
             rs,
             alpha,
         }
@@ -220,8 +202,8 @@ impl<F: Field, Ext: ExtensionField<F>> MultiRound<F, Ext> {
 
     fn weights(&self, poly: &Poly<Ext>) -> Ext {
         let rs = &self.rs.reversed();
-        let eqs = self
-            .points_base
+        let weights = self
+            .eq_points
             .iter()
             .map(|zs| {
                 let off = poly.k();
@@ -229,36 +211,19 @@ impl<F: Field, Ext: ExtensionField<F>> MultiRound<F, Ext> {
                 let (zs0, zs1) = zs.split_at(off);
                 eval_eq_xy(&zs1, rs) * poly.eval(&zs0.as_ext::<Ext>())
             })
-            .chain(self.vars_base.iter().map(|zs| {
+            .chain(self.pow_points.iter().map(|zs| {
                 let off = poly.k();
                 assert_eq!(off, zs.len() - rs.len());
                 let (zs0, zs1) = zs.split_at(off);
-
                 if off == 0 {
+                    // TODO: we need this condition?
                     eval_pow_xy(&zs1, rs) * poly.constant().unwrap()
                 } else {
                     eval_pow_xy(&zs1, rs) * poly.eval_univariate(Ext::from(*zs0.first().unwrap()))
                 }
             }))
-            .chain(self.points_ext.iter().map(|zs| {
-                let off = poly.k();
-                assert_eq!(off, zs.len() - rs.len());
-                let (zs0, zs1) = zs.split_at(off);
-                eval_eq_xy(&zs1, rs) * poly.eval(&zs0)
-            }))
-            .chain(self.vars_ext.iter().map(|zs| {
-                let off = poly.k();
-                assert_eq!(off, zs.len() - rs.len());
-                let (zs0, zs1) = zs.split_at(off);
-
-                if off == 0 {
-                    eval_pow_xy(&zs1, rs) * poly.constant().unwrap()
-                } else {
-                    eval_pow_xy(&zs1, rs) * poly.eval_univariate(*zs0.first().unwrap())
-                }
-            }))
-            .collect::<Vec<_>>();
-        eqs.iter().horner_shifted(self.alpha, self.alpha)
+            .collect::<Vec<Ext>>();
+        weights.iter().horner(self.alpha)
     }
 }
 
@@ -300,25 +265,20 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
         transcript: &mut Transcript,
         d: usize,
         alpha: Ext,
-        eq_claims_base: &[EqClaim<F, Ext>],
-        eq_claims_ext: &[EqClaim<Ext, Ext>],
-        pow_claims_base: &[PowClaim<F, Ext>],
-        pow_claims_ext: &[PowClaim<Ext, Ext>],
+        eq_claims: &[EqClaim<Ext, Ext>],
+        pow_claims: &[PowClaim<F, Ext>],
     ) -> Result<Point<Ext>, crate::Error>
     where
         Transcript: Reader<Ext> + Challenge<F, Ext>,
     {
-        eq_claims_ext.iter().for_each(|o| assert_eq!(o.k(), self.k));
-        eq_claims_base
-            .iter()
-            .for_each(|o| assert_eq!(o.k(), self.k));
+        eq_claims.iter().for_each(|o| assert_eq!(o.k(), self.k));
+        pow_claims.iter().for_each(|o| assert_eq!(o.k, self.k));
 
         // update sum
-        self.sum = std::iter::once(&self.sum)
-            .chain(eq_claims_base.iter().map(EqClaim::<F, Ext>::eval))
-            .chain(pow_claims_base.iter().map(PowClaim::<F, Ext>::eval))
-            .chain(eq_claims_ext.iter().map(EqClaim::<Ext, Ext>::eval))
-            .chain(pow_claims_ext.iter().map(PowClaim::<Ext, Ext>::eval))
+        self.sum += eq_claims
+            .iter()
+            .map(EqClaim::<Ext, Ext>::eval)
+            .chain(pow_claims.iter().map(PowClaim::<F, Ext>::eval))
             .horner(alpha);
 
         // run sumcheck rounds
@@ -333,25 +293,12 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
             .for_each(|round| round.extend(&round_rs));
 
         // add current multi rounds
-        let eq_points_base = eq_claims_base
-            .iter()
-            .map(EqClaim::point)
-            .collect::<Vec<_>>();
-        let eq_points_ext = eq_claims_ext.iter().map(EqClaim::point).collect::<Vec<_>>();
-        let pow_points_base = pow_claims_base
-            .iter()
-            .map(PowClaim::point)
-            .collect::<Vec<_>>();
-        let pow_points_ext = pow_claims_ext
-            .iter()
-            .map(PowClaim::point)
-            .collect::<Vec<_>>();
+        let eq_points = eq_claims.iter().map(EqClaim::point).collect::<Vec<_>>();
+        let pow_points = pow_claims.iter().map(PowClaim::point).collect::<Vec<_>>();
 
         self.multi_rounds.push(MultiRound::new(
-            eq_points_base,
-            eq_points_ext,
-            pow_points_base,
-            pow_points_ext,
+            eq_points,
+            pow_points,
             round_rs.clone(),
             alpha,
         ));
@@ -386,8 +333,7 @@ mod test {
     use crate::{
         pcs::{
             test::{
-                get_eq_claims_base, get_eq_claims_ext, get_pow_claims_base, get_pow_claims_ext,
-                make_eq_claims_base, make_eq_claims_ext, make_pow_claims_base, make_pow_claims_ext,
+                get_eq_claims_ext, get_pow_claims_base, make_eq_claims_ext, make_pow_claims_base,
             },
             EqClaim, PowClaim,
         },
@@ -414,21 +360,19 @@ mod test {
             let poly: super::Poly<F> = Poly::rand(&mut rng, k);
 
             for d in 1..=5 {
+                let n_eqs = 10;
                 let (proof, checkpoint_prover) = {
                     let mut transcript = Writer::init("");
 
-                    let eq_claims_ext =
-                        make_eq_claims_ext::<_, F, F, Ext>(&mut transcript, 4, &poly).unwrap();
-                    let pow_claims_ext =
-                        make_pow_claims_ext::<_, F, F, Ext>(&mut transcript, 3, &poly).unwrap();
+                    let eq_claims =
+                        make_eq_claims_ext::<_, F, F, Ext>(&mut transcript, n_eqs, &poly).unwrap();
 
                     let alpha = Challenge::<F, Ext>::draw(&mut transcript);
                     let sc = super::Sumcheck::<F, Ext>::new(
                         &mut transcript,
                         d,
                         alpha,
-                        &eq_claims_ext[..],
-                        &pow_claims_ext[..],
+                        &eq_claims,
                         &poly,
                     )
                     .unwrap();
@@ -436,17 +380,10 @@ mod test {
                     assert_eq!(sc.k(), k - d);
 
                     {
-                        let points_ext =
-                            eq_claims_ext.iter().map(EqClaim::point).collect::<Vec<_>>();
-                        let vars_ext = pow_claims_ext
-                            .iter()
-                            .map(PowClaim::point)
-                            .collect::<Vec<_>>();
+                        let eq_points = eq_claims.iter().map(EqClaim::point).collect::<Vec<_>>();
                         let round = super::MultiRound::<F, Ext>::new(
+                            eq_points,
                             vec![],
-                            points_ext,
-                            vec![],
-                            vars_ext,
                             sc.rs.clone(),
                             alpha,
                         );
@@ -462,21 +399,13 @@ mod test {
                 let checkpoint_verifier = {
                     let mut transcript = Reader::init(&proof, "");
                     let eq_claims_ext =
-                        get_eq_claims_ext::<_, F, Ext>(&mut transcript, k, 4).unwrap();
+                        get_eq_claims_ext::<_, F, Ext>(&mut transcript, k, n_eqs).unwrap();
                     let pow_claims_ext =
-                        get_pow_claims_ext::<_, F, Ext>(&mut transcript, k, 3).unwrap();
+                        get_pow_claims_base::<_, F, Ext>(&mut transcript, k, 0).unwrap();
                     let mut verifier = super::SumcheckVerifier::<F, Ext>::new(k);
                     let alpha = Challenge::<F, Ext>::draw(&mut transcript);
                     verifier
-                        .fold(
-                            &mut transcript,
-                            d,
-                            alpha,
-                            &[],
-                            &eq_claims_ext,
-                            &[],
-                            &pow_claims_ext,
-                        )
+                        .fold(&mut transcript, d, alpha, &eq_claims_ext, &pow_claims_ext)
                         .unwrap();
                     verifier.finalize(&mut transcript, None).unwrap();
                     transcript.draw()
@@ -489,20 +418,12 @@ mod test {
             let mut rng = crate::test::rng(1);
             for n_fold in 2..4 {
                 for _ in 0..100 {
-                    let n_base_eqs = (0..n_fold)
-                        .map(|i| if i == 0 { 0 } else { rng.random_range(1..4) })
-                        .collect::<Vec<usize>>();
-
-                    let n_ext_eqs = (0..n_fold)
+                    let n_eqs = (0..n_fold)
                         .map(|_| rng.random_range(1..4))
                         .collect::<Vec<usize>>();
 
-                    let n_base_pows = (0..n_fold)
+                    let n_pows = (0..n_fold)
                         .map(|i| if i == 0 { 0 } else { rng.random_range(1..4) })
-                        .collect::<Vec<usize>>();
-
-                    let n_ext_pows = (0..n_fold)
-                        .map(|_| rng.random_range(1..4))
                         .collect::<Vec<usize>>();
 
                     let ds = (0..n_fold)
@@ -519,45 +440,31 @@ mod test {
                         let mut round = 0;
 
                         let (mut sc, mut rounds) = {
-                            let n_eq_ext = n_ext_eqs[0];
-                            let n_pow_ext = n_ext_pows[0];
+                            let n_eqs = n_eqs[0];
+                            let n_pows = n_pows[0];
+                            assert_eq!(n_pows, 0);
                             let d = ds[0];
 
-                            let eq_claims_ext =
-                                make_eq_claims_ext(&mut transcript, n_eq_ext, &poly).unwrap();
-
-                            let pow_claims_ext =
-                                make_pow_claims_ext(&mut transcript, n_pow_ext, &poly).unwrap();
+                            let eq_claims =
+                                make_eq_claims_ext(&mut transcript, n_eqs, &poly).unwrap();
 
                             k_folding -= d;
                             round += d;
 
                             let alpha = Challenge::<F, Ext>::draw(&mut transcript);
 
-                            let sc = super::Sumcheck::new(
-                                &mut transcript,
-                                d,
-                                alpha,
-                                &eq_claims_ext,
-                                &pow_claims_ext,
-                                &poly,
-                            )
-                            .unwrap();
+                            let sc =
+                                super::Sumcheck::new(&mut transcript, d, alpha, &eq_claims, &poly)
+                                    .unwrap();
 
                             assert_eq!(sc.k(), k_folding);
                             assert_eq!(k - sc.k(), round);
 
-                            let points_ext =
-                                eq_claims_ext.iter().map(EqClaim::point).collect::<Vec<_>>();
-                            let var_ext = pow_claims_ext
-                                .iter()
-                                .map(PowClaim::point)
-                                .collect::<Vec<_>>();
+                            let eq_points =
+                                eq_claims.iter().map(EqClaim::point).collect::<Vec<_>>();
                             let round = super::MultiRound::<F, Ext>::new(
+                                eq_points,
                                 vec![],
-                                points_ext,
-                                vec![],
-                                var_ext,
                                 sc.rs.clone(),
                                 alpha,
                             );
@@ -566,104 +473,59 @@ mod test {
                             (sc, vec![round])
                         };
 
-                        n_ext_eqs
+                        n_eqs
                             .iter()
-                            .zip(n_base_eqs.iter())
-                            .zip(n_ext_pows.iter())
-                            .zip(n_base_pows.iter())
+                            .zip(n_pows.iter())
                             .zip(ds.iter())
                             .skip(1)
-                            .for_each(
-                                |((((&n_eq_ext, &n_eq_base), &n_pow_ext), &n_pow_base), &d)| {
-                                    k_folding -= d;
-                                    round += d;
+                            .for_each(|((&n_eq_ext, &n_pow_base), &d)| {
+                                k_folding -= d;
+                                round += d;
 
-                                    let eq_claims_base = make_eq_claims_base::<_, F, Ext>(
-                                        &mut transcript,
-                                        n_eq_base,
-                                        &sc.poly,
-                                    )
+                                let eq_claims = make_eq_claims_ext::<_, F, Ext, Ext>(
+                                    &mut transcript,
+                                    n_eq_ext,
+                                    &sc.poly,
+                                )
+                                .unwrap();
+
+                                let pow_claims = make_pow_claims_base::<_, F, Ext>(
+                                    &mut transcript,
+                                    n_pow_base,
+                                    &sc.poly,
+                                )
+                                .unwrap();
+
+                                let alpha = Challenge::<F, Ext>::draw(&mut transcript);
+                                let rs = sc
+                                    .fold(&mut transcript, d, alpha, &eq_claims, &pow_claims)
                                     .unwrap();
 
-                                    let eq_claims_ext = make_eq_claims_ext::<_, F, Ext, Ext>(
-                                        &mut transcript,
-                                        n_eq_ext,
-                                        &sc.poly,
-                                    )
-                                    .unwrap();
+                                assert_eq!(sc.k(), k_folding);
+                                assert_eq!(k - sc.k(), round);
 
-                                    let pow_claims_base = make_pow_claims_base::<_, F, Ext>(
-                                        &mut transcript,
-                                        n_pow_base,
-                                        &sc.poly,
-                                    )
-                                    .unwrap();
+                                {
+                                    rounds.iter_mut().for_each(|round| round.extend(&rs));
 
-                                    let pow_claims_ext = make_pow_claims_ext::<_, F, Ext, Ext>(
-                                        &mut transcript,
-                                        n_pow_ext,
-                                        &sc.poly,
-                                    )
-                                    .unwrap();
+                                    let eq_points =
+                                        eq_claims.iter().map(EqClaim::point).collect::<Vec<_>>();
 
-                                    let alpha = Challenge::<F, Ext>::draw(&mut transcript);
-                                    let rs = sc
-                                        .fold(
-                                            &mut transcript,
-                                            d,
-                                            alpha,
-                                            &eq_claims_base,
-                                            &eq_claims_ext,
-                                            &pow_claims_base,
-                                            &pow_claims_ext,
-                                        )
-                                        .unwrap();
+                                    let pow_points =
+                                        pow_claims.iter().map(PowClaim::point).collect::<Vec<_>>();
 
-                                    assert_eq!(sc.k(), k_folding);
-                                    assert_eq!(k - sc.k(), round);
+                                    rounds.push(super::MultiRound::<F, Ext>::new(
+                                        eq_points, pow_points, rs, alpha,
+                                    ));
+                                }
 
-                                    {
-                                        rounds.iter_mut().for_each(|round| round.extend(&rs));
-
-                                        let points_base = eq_claims_base
-                                            .iter()
-                                            .map(EqClaim::point)
-                                            .collect::<Vec<_>>();
-
-                                        let points_ext = eq_claims_ext
-                                            .iter()
-                                            .map(EqClaim::point)
-                                            .collect::<Vec<_>>();
-
-                                        let vars_base = pow_claims_base
-                                            .iter()
-                                            .map(|claim| claim.point())
-                                            .collect::<Vec<_>>();
-
-                                        let vars_ext = pow_claims_ext
-                                            .iter()
-                                            .map(|claim| claim.point())
-                                            .collect::<Vec<_>>();
-
-                                        rounds.push(super::MultiRound::<F, Ext>::new(
-                                            points_base,
-                                            points_ext,
-                                            vars_base,
-                                            vars_ext,
-                                            rs,
-                                            alpha,
-                                        ));
-                                    }
-
-                                    assert_eq!(
-                                        rounds
-                                            .iter()
-                                            .map(|round| round.weights(&sc.poly))
-                                            .sum::<Ext>(),
-                                        sc.sum
-                                    );
-                                },
-                            );
+                                assert_eq!(
+                                    rounds
+                                        .iter()
+                                        .map(|round| round.weights(&sc.poly))
+                                        .sum::<Ext>(),
+                                    sc.sum
+                                );
+                            });
 
                         assert_eq!(round, k);
                         assert_eq!(k_folding, 0);
@@ -678,60 +540,30 @@ mod test {
                         let mut transcript = Reader::init(&proof, "");
                         let mut verifier = super::SumcheckVerifier::<F, Ext>::new(k);
 
-                        n_ext_eqs
-                            .iter()
-                            .zip(n_base_eqs.iter())
-                            .zip(n_ext_pows.iter())
-                            .zip(n_base_pows.iter())
-                            .zip(ds.iter())
-                            .for_each(
-                                |((((&n_eq_ext, &n_eq_base), &n_pow_ext), &n_pow_base), &d)| {
-                                    let eq_claims_base: Vec<EqClaim<F, Ext>> =
-                                        get_eq_claims_base::<_, F, Ext>(
-                                            &mut transcript,
-                                            verifier.k,
-                                            n_eq_base,
-                                        )
-                                        .unwrap();
+                        n_eqs.iter().zip(n_pows.iter()).zip(ds.iter()).for_each(
+                            |((&n_eq_ext, &n_pow_base), &d)| {
+                                let eq_claims: Vec<EqClaim<Ext, Ext>> =
+                                    get_eq_claims_ext::<_, F, Ext>(
+                                        &mut transcript,
+                                        verifier.k,
+                                        n_eq_ext,
+                                    )
+                                    .unwrap();
 
-                                    let eq_claims_ext: Vec<EqClaim<Ext, Ext>> =
-                                        get_eq_claims_ext::<_, F, Ext>(
-                                            &mut transcript,
-                                            verifier.k,
-                                            n_eq_ext,
-                                        )
-                                        .unwrap();
+                                let pow_claims: Vec<PowClaim<F, Ext>> =
+                                    get_pow_claims_base::<_, F, Ext>(
+                                        &mut transcript,
+                                        verifier.k,
+                                        n_pow_base,
+                                    )
+                                    .unwrap();
 
-                                    let pow_claims_base: Vec<PowClaim<F, Ext>> =
-                                        get_pow_claims_base::<_, F, Ext>(
-                                            &mut transcript,
-                                            verifier.k,
-                                            n_pow_base,
-                                        )
-                                        .unwrap();
-
-                                    let pow_claims_ext: Vec<PowClaim<Ext, Ext>> =
-                                        get_pow_claims_ext::<_, F, Ext>(
-                                            &mut transcript,
-                                            verifier.k,
-                                            n_pow_ext,
-                                        )
-                                        .unwrap();
-
-                                    let alpha = Challenge::<F, Ext>::draw(&mut transcript);
-                                    verifier
-                                        .fold(
-                                            &mut transcript,
-                                            d,
-                                            alpha,
-                                            &eq_claims_base,
-                                            &eq_claims_ext,
-                                            &pow_claims_base,
-                                            &pow_claims_ext,
-                                        )
-                                        .unwrap();
-                                },
-                            );
+                                let alpha = Challenge::<F, Ext>::draw(&mut transcript);
+                                verifier
+                                    .fold(&mut transcript, d, alpha, &eq_claims, &pow_claims)
+                                    .unwrap();
+                            },
+                        );
 
                         verifier.finalize(&mut transcript, None).unwrap();
                         let checkpoint: F = transcript.draw();

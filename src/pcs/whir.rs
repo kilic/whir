@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use p3_dft::{Radix2DFTSmallBatch, TwoAdicSubgroupDft};
+use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, TwoAdicField};
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::Matrix;
@@ -17,7 +17,8 @@ use crate::{
 };
 
 #[tracing::instrument(skip_all)]
-pub fn commit_base<Transcript, F: TwoAdicField, MT: MerkleTree<F>>(
+pub fn commit_base<Transcript, F: TwoAdicField, Dft: TwoAdicSubgroupDft<F>, MT: MerkleTree<F>>(
+    dft: &Dft,
     transcript: &mut Transcript,
     poly: &[F],
     rate: usize,
@@ -31,12 +32,19 @@ where
     let mut mat = RowMajorMatrixView::new(poly, width).transpose();
     mat.pad_to_height(1 << (poly.k() + rate - folding), F::ZERO);
     let codeword = tracing::info_span!("dft-base", height = mat.height(), width = mat.width())
-        .in_scope(|| Radix2DFTSmallBatch::<F>::default().dft_batch(mat));
+        .in_scope(|| dft.dft_batch(mat).to_row_major_matrix());
     mt.commit(transcript, codeword)
 }
 
 #[tracing::instrument(skip_all)]
-pub fn commit_ext<Transcript, F: TwoAdicField, Ext: ExtensionField<F>, MT: MerkleTreeExt<F, Ext>>(
+pub fn commit_ext<
+    Transcript,
+    F: TwoAdicField,
+    Ext: ExtensionField<F>,
+    Dft: TwoAdicSubgroupDft<F>,
+    MT: MerkleTreeExt<F, Ext>,
+>(
+    dft: &Dft,
     transcript: &mut Transcript,
     poly: &[Ext],
     rate: usize,
@@ -50,7 +58,7 @@ where
     let mut mat = RowMajorMatrixView::new(poly, width).transpose();
     mat.pad_to_height(1 << (poly.k() + rate - folding), Ext::ZERO);
     let codeword = tracing::info_span!("dft-ext", h = mat.height(), w = mat.width())
-        .in_scope(|| Radix2DFTSmallBatch::<F>::default().dft_algebra_batch(mat));
+        .in_scope(|| dft.dft_algebra_batch(mat));
     mt.commit(transcript, codeword)
 }
 
@@ -117,8 +125,9 @@ impl<
         }
     }
 
-    pub fn commit<Transcript>(
+    pub fn commit<Transcript, Dft: TwoAdicSubgroupDft<F>>(
         &self,
+        dft: &Dft,
         transcript: &mut Transcript,
         poly: &Poly<F, Eval>,
     ) -> Result<MT::MerkleData, crate::Error>
@@ -126,7 +135,7 @@ impl<
         Transcript:
             Writer<Ext> + Writer<<MT::MerkleData as MerkleData>::Digest> + Challenge<F, Ext>,
     {
-        commit_base(transcript, poly, self.rate, self.folding, &self.mt)
+        commit_base(dft, transcript, poly, self.rate, self.folding, &self.mt)
     }
 
     fn n_ood_queries(&self, k: usize, rate: usize) -> usize {
@@ -156,8 +165,9 @@ impl<
         (k_folded_domain, this_rate, prev_rate)
     }
 
-    pub fn open<Transcript>(
+    pub fn open<Transcript, Dft: TwoAdicSubgroupDft<F>>(
         &self,
+        dft: &Dft,
         transcript: &mut Transcript,
         claims: Vec<EqClaim<Ext, Ext>>,
         comm_data: MT::MerkleData,
@@ -194,7 +204,7 @@ impl<
         let alpha = Challenge::draw(transcript);
         // initialize the sumcheck instance
         // `self.folding` number of rounds is run
-        let mut sumcheck = Sumcheck::new(transcript, self.folding, alpha, &claims, &[], &poly)?;
+        let mut sumcheck = Sumcheck::new(transcript, self.folding, alpha, &claims, &poly)?;
 
         // derive number of rounds
         let (n_rounds, final_sumcheck_rounds) = compute_number_of_rounds(self.folding, self.k);
@@ -210,7 +220,8 @@ impl<
 
                 // commit to the polynomial in coefficient representation
                 let _round_data: MTExt::MerkleData = {
-                    commit_ext::<_, F, Ext, _>(
+                    commit_ext::<_, F, Ext, _, _>(
+                        dft,
                         transcript,
                         &sumcheck.poly,
                         this_rate,
@@ -294,10 +305,8 @@ impl<
                     transcript,
                     self.folding,
                     alpha,
-                    &[],
                     &ood_claims,
                     &stir_claims,
-                    &[],
                 )?);
                 round_data = Some(_round_data);
                 Ok(())
@@ -386,8 +395,7 @@ impl<
         let alpha = Challenge::draw(transcript);
 
         // run first set of sumcheck rounds
-        let mut round_point =
-            sumcheck.fold(transcript, self.folding, alpha, &[], &claims, &[], &[])?;
+        let mut round_point = sumcheck.fold(transcript, self.folding, alpha, &claims, &[])?;
 
         // round commitment is used validate stir points in the next set of rounds
         let mut round_comm: Option<<MTExt::MerkleData as MerkleData>::Digest> = None;
@@ -471,15 +479,8 @@ impl<
             // draw the combination challenge
             let alpha = Challenge::draw(transcript);
             // run current set of sumcheck rounds
-            round_point = sumcheck.fold(
-                transcript,
-                self.folding,
-                alpha,
-                &[],
-                &ood_claims,
-                &stir_claims,
-                &[],
-            )?;
+            round_point =
+                sumcheck.fold(transcript, self.folding, alpha, &ood_claims, &stir_claims)?;
         }
 
         // read the final polynomial
