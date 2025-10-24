@@ -15,9 +15,9 @@ pub fn compress_claims<F: Field, Ext: ExtensionField<F>>(
 ) {
     use crate::utils::TwoAdicSlice;
     let k = weights.k();
-
-    eq_claims.iter().for_each(|o| assert_eq!(o.k(), k));
-    pow_claims.iter().for_each(|o| assert_eq!(o.k, k));
+    assert_ne!(k, 0);
+    eq_claims.iter().for_each(|claim| assert_eq!(claim.k(), k));
+    pow_claims.iter().for_each(|claim| assert_eq!(claim.k, k));
 
     *sum += eq_claims
         .iter()
@@ -28,21 +28,23 @@ pub fn compress_claims<F: Field, Ext: ExtensionField<F>>(
     let points = eq_claims.iter().map(EqClaim::point).collect::<Vec<_>>();
     let vars = pow_claims.iter().map(PowClaim::var).collect::<Vec<_>>();
 
-    compress_eqs::<F, Ext>(weights, k, &points, alpha);
-    compress_pows(weights, k, &vars, alpha, points.len());
+    compress_eqs::<F, Ext>(weights, &points, alpha);
+    compress_pows(weights, &vars, alpha, points.len());
 }
 
 #[tracing::instrument(skip_all, fields(points = points.len(), k = out.k()))]
 pub(super) fn compress_eqs<F: Field, Ext: ExtensionField<F>>(
     out: &mut [Ext],
-    k: usize,
     points: &[Point<Ext>],
     alpha: Ext,
 ) {
+    let k = out.k();
+    assert_ne!(k, 0);
     if points.is_empty() {
         return;
     }
     points.iter().for_each(|point| assert_eq!(point.len(), k));
+
     let alphas = alpha.powers().take(points.len()).collect();
     let points = points
         .iter()
@@ -56,11 +58,12 @@ pub(super) fn compress_eqs<F: Field, Ext: ExtensionField<F>>(
 #[tracing::instrument(skip_all, fields(vars = vars.len(), k = out.k()))]
 pub(super) fn compress_pows<F: Field, Ext: ExtensionField<F>>(
     out: &mut [Ext],
-    k: usize,
     vars: &[F],
     alpha: Ext,
     shift: usize,
 ) {
+    let k = out.k();
+    assert_ne!(k, 0);
     if vars.is_empty() {
         return;
     }
@@ -85,12 +88,12 @@ pub(super) fn compress_pows<F: Field, Ext: ExtensionField<F>>(
 
     for i in 0..k {
         let (lo, hi) = acc.split_at_mut((1 << i) * n);
-        let combos = bin_powers.iter().map(|c| c[i]).collect::<Vec<_>>();
+        let bin_powers = bin_powers.iter().map(|c| c[i]).collect::<Vec<_>>();
 
         lo.par_chunks_mut(n)
             .zip(hi.par_chunks_mut(n))
             .for_each(|(lo, hi)| {
-                combos
+                bin_powers
                     .iter()
                     .zip(lo.iter().zip(hi.iter_mut()))
                     .for_each(|(&combo, (&lo, hi))| *hi = lo * combo);
@@ -180,8 +183,8 @@ mod test {
 
                 let acc0 = compress_naive(k, alpha, &points, &vars);
                 let mut acc1 = Poly::<Ext>::zero(k);
-                compress_eqs::<F, _>(&mut acc1, k, &points, alpha);
-                compress_pows(&mut acc1, k, &vars, alpha, points.len());
+                compress_eqs::<F, _>(&mut acc1, &points, alpha);
+                compress_pows(&mut acc1, &vars, alpha, points.len());
                 assert_eq!(acc0, acc1);
             }
         }
