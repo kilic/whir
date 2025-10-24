@@ -115,7 +115,7 @@ mod test {
             sumcheck::compress::{compress_eqs, compress_pows},
             test::{make_eq_claims_ext, make_pow_claims_base},
         },
-        poly::{Eval, Point, Poly},
+        poly::{Point, Poly},
         transcript::test_transcript::TestWriter,
         utils::VecOps,
     };
@@ -132,7 +132,7 @@ mod test {
         alpha: Ext,
         points: &[Point<Ext>],
         vars: &[F],
-    ) -> Poly<Ext, Eval> {
+    ) -> Poly<Ext> {
         let eqs = points
             .iter()
             .map(|point| point.eq(Ext::ONE))
@@ -162,7 +162,7 @@ mod test {
 
         let mut transcript = TestWriter::<Vec<u8>, F>::init();
         for k in 1..5 {
-            let poly = Poly::<Ext, Eval>::rand(&mut rng, k);
+            let poly = Poly::<Ext>::rand(&mut rng, k);
             for _ in 0..1000 {
                 let alpha: Ext = rng.random();
 
@@ -179,7 +179,7 @@ mod test {
                 let vars = pow_claims.iter().map(|c| c.var()).collect::<Vec<_>>();
 
                 let acc0 = compress_naive(k, alpha, &points, &vars);
-                let mut acc1 = Poly::<Ext, Eval>::zero(k);
+                let mut acc1 = Poly::<Ext>::zero(k);
                 compress_eqs::<F, _>(&mut acc1, k, &points, alpha);
                 compress_pows(&mut acc1, k, &vars, alpha, points.len());
                 assert_eq!(acc0, acc1);

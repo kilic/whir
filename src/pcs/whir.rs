@@ -11,7 +11,7 @@ use crate::{
         sumcheck::{Sumcheck, SumcheckVerifier},
         EqClaim, PowClaim,
     },
-    poly::{Eval, Point, Poly},
+    poly::{Point, Poly},
     transcript::{Challenge, ChallengeBits, Reader, Writer},
     utils::TwoAdicSlice,
 };
@@ -129,7 +129,7 @@ impl<
         &self,
         dft: &Dft,
         transcript: &mut Transcript,
-        poly: &Poly<F, Eval>,
+        poly: &Poly<F>,
     ) -> Result<MT::MerkleData, crate::Error>
     where
         Transcript:
@@ -171,7 +171,7 @@ impl<
         transcript: &mut Transcript,
         claims: Vec<EqClaim<Ext, Ext>>,
         comm_data: MT::MerkleData,
-        poly: Poly<F, Eval>,
+        poly: Poly<F>,
     ) -> Result<(), crate::Error>
     where
         Transcript: Writer<F>
@@ -266,11 +266,8 @@ impl<
                         .iter()
                         .zip(vars.iter())
                         .map(|(local_poly, &var)| {
-                            let eval = Poly::<_, Eval>::new(local_poly.to_vec())
-                                .eval(&sumcheck.rs.reversed());
-
+                            let eval = Poly::new(local_poly.to_vec()).eval(&sumcheck.rs.reversed());
                             debug_assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
-
                             PowClaim::new(var, eval, sumcheck.k())
                         })
                         .collect::<Vec<_>>()
@@ -288,8 +285,7 @@ impl<
                         .iter()
                         .zip(vars.iter())
                         .map(|(local_poly, &var)| {
-                            let eval = Poly::<_, Eval>::new(local_poly.to_vec())
-                                .eval(&round_point.reversed());
+                            let eval = Poly::new(local_poly.to_vec()).eval(&round_point.reversed());
 
                             debug_assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
 
@@ -333,7 +329,7 @@ impl<
                     {
                         let var = F::two_adic_generator(k_folded_domain).exp_u64(index as u64);
                         let round_point = round_point.as_ref().unwrap().reversed();
-                        let eval = Poly::<_, Eval>::new(_cw_local_poly.to_vec()).eval(&round_point);
+                        let eval = Poly::new(_cw_local_poly.to_vec()).eval(&round_point);
                         assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
                     }
                     Ok(())
@@ -346,7 +342,7 @@ impl<
                     {
                         let var = F::two_adic_generator(k_folded_domain).exp_u64(index as u64);
                         let round_point = sumcheck.rs.reversed();
-                        let eval = Poly::<_, Eval>::new(_cw_local_poly.to_vec()).eval(&round_point);
+                        let eval = Poly::new(_cw_local_poly.to_vec()).eval(&round_point);
                         assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
                     }
 
@@ -445,7 +441,7 @@ impl<
                         // let point = Point::expand(sumcheck.k, omega.exp_u64(index as u64));
                         // evaluate the local polynomial at the round point
                         // and return the claim for sumcheck
-                        let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
+                        let eval = Poly::new(local_poly).eval(&round_point.reversed());
                         Ok(PowClaim::new(var, eval, sumcheck.k))
                     })
                     .collect::<Result<Vec<_>, _>>()
@@ -467,7 +463,7 @@ impl<
                         // let point = Point::expand(sumcheck.k, omega.exp_u64(index as u64));
                         // evaluate the local polynomial at the round point
                         // and return the claim for sumcheck
-                        let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
+                        let eval = Poly::new(local_poly).eval(&round_point.reversed());
                         Ok(PowClaim::new(var, eval, sumcheck.k))
                     })
                     .collect::<Result<Vec<_>, _>>()
@@ -485,7 +481,7 @@ impl<
 
         // read the final polynomial
         assert_eq!(sumcheck.k, final_sumcheck_rounds);
-        let final_poly = Poly::<Ext, Eval>::new(transcript.read_many(1 << sumcheck.k)?);
+        let final_poly = Poly::<Ext>::new(transcript.read_many(1 << sumcheck.k)?);
 
         // derive round params for the final set of rounds
         let (k_folded_domain, _, prev_rate) = self.round_params(n_rounds);
@@ -510,7 +506,7 @@ impl<
                 // derive the univariate point
                 let var = omega.exp_u64(index as u64);
                 // evaluate the local polynomial at the round point
-                let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
+                let eval = Poly::new(local_poly).eval(&round_point.reversed());
 
                 // verify stir evaluations against final polynomial
                 (eval == final_poly.eval_univariate(Ext::from(var)))
@@ -526,7 +522,7 @@ impl<
                 // derive the univariate point
                 let var = omega.exp_u64(index as u64);
                 // evaluate the local polynomial at the round point
-                let eval = Poly::<_, Eval>::new(local_poly).eval(&round_point.reversed());
+                let eval = Poly::new(local_poly).eval(&round_point.reversed());
 
                 // verify stir evaluations against final polynomial
                 (eval == final_poly.eval_univariate(Ext::from(var)))

@@ -3,14 +3,12 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIter
 
 use crate::{
     pcs::{sumcheck::compress::compress_claims, EqClaim, PowClaim},
-    poly::{eval_eq_xy, eval_pow_xy, Eval, Point},
+    poly::{eval_eq_xy, eval_pow_xy, Point, Poly},
     transcript::{Challenge, Reader, Writer},
     utils::VecOps,
 };
 
 mod compress;
-
-type Poly<F> = crate::poly::Poly<F, Eval>;
 
 fn extrapolate<F: Field, EF: ExtensionField<F>>(evals: &[F], target: EF) -> EF {
     let points = (0..evals.len())

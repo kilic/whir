@@ -1,4 +1,4 @@
-use crate::poly::{Eval, Point, Poly};
+use crate::poly::{Point, Poly};
 use p3_field::{ExtensionField, Field};
 
 pub mod params;
@@ -20,7 +20,7 @@ impl<F: Field, Ext: ExtensionField<F>> EqClaim<F, Ext> {
         self.point.len()
     }
 
-    pub fn eq(&self) -> Poly<F, Eval> {
+    pub fn eq(&self) -> Poly<F> {
         self.point.eq(F::ONE)
     }
 
@@ -45,7 +45,7 @@ impl<F: Field, Ext: ExtensionField<F>> PowClaim<F, Ext> {
         Self { var, eval, k }
     }
 
-    pub fn pow(&self, k: usize) -> Poly<F, Eval> {
+    pub fn pow(&self, k: usize) -> Poly<F> {
         self.var.powers().take(k).collect().into()
     }
 
@@ -68,7 +68,7 @@ mod test {
         field::SerializedField,
         merkle::{poseidon_packed::PackedPoseidonMerkleTree, rust_crypto::RustCryptoMerkleTree},
         pcs::{params::SecurityAssumption, whir::Whir, EqClaim, PowClaim},
-        poly::{Eval, Point, Poly},
+        poly::{Point, Poly},
         transcript::{
             poseidon::{PoseidonReader, PoseidonWriter},
             rust_crypto::{RustCryptoReader, RustCryptoWriter},
@@ -92,11 +92,7 @@ mod test {
         use p3_field::PrimeCharacteristicRing;
         use p3_field::TwoAdicField;
 
-        pub fn encode<F: TwoAdicField>(
-            poly: &Poly<F, Eval>,
-            rate: usize,
-            folding: usize,
-        ) -> Poly<F, Eval> {
+        pub fn encode<F: TwoAdicField>(poly: &Poly<F>, rate: usize, folding: usize) -> Poly<F> {
             let width = 1 << (poly.k() - folding);
             let mut mat = RowMajorMatrixView::new(poly, width).transpose();
             mat.pad_to_height(1 << (poly.k() + rate - folding), F::ZERO);
@@ -106,26 +102,26 @@ mod test {
                 .into()
         }
 
-        fn fold<F: TwoAdicField>(r: &Point<F>, evals: &Poly<F, Eval>) -> Poly<F, Eval> {
+        fn fold<F: TwoAdicField>(r: &Point<F>, evals: &Poly<F>) -> Poly<F> {
             let mut evals = evals.clone();
             r.iter().for_each(|&r| evals.fix_var_mut(r));
             evals
         }
 
-        fn fold_reversed<F: TwoAdicField>(r: &Point<F>, evals: &Poly<F, Eval>) -> Poly<F, Eval> {
+        fn fold_reversed<F: TwoAdicField>(r: &Point<F>, evals: &Poly<F>) -> Poly<F> {
             let mut evals = evals.clone().reverse_index_bits();
             r.iter().for_each(|&r| evals.fix_var_mut(r));
             evals.reverse_index_bits()
         }
 
-        fn query(i: usize, folding: usize, cw: &Poly<F, Eval>) -> Poly<F, Eval> {
+        fn query(i: usize, folding: usize, cw: &Poly<F>) -> Poly<F> {
             cw[i << folding..(i + 1) << folding].to_vec().into()
         }
 
         let mut rng = &mut crate::test::rng(1);
 
         let k = 5usize;
-        let f0 = Poly::<F, Eval>::rand(&mut rng, k);
+        let f0 = Poly::<F>::rand(&mut rng, k);
 
         {
             let var: F = rng.random();
@@ -173,7 +169,7 @@ mod test {
     >(
         transcript: &mut Transcript,
         n_points: usize,
-        poly: &Poly<Ex0, Eval>,
+        poly: &Poly<Ex0>,
     ) -> Result<Vec<EqClaim<Ex1, Ex1>>, crate::Error>
     where
         Transcript: Challenge<F, Ex1> + Writer<Ex1>,
@@ -192,7 +188,7 @@ mod test {
     pub(crate) fn make_pow_claims_base<Transcript, F: Field, Ext: ExtensionField<F>>(
         transcript: &mut Transcript,
         n_points: usize,
-        poly: &Poly<Ext, Eval>,
+        poly: &Poly<Ext>,
     ) -> Result<Vec<PowClaim<F, Ext>>, crate::Error>
     where
         Transcript: Challenge<F, F> + Writer<Ext>,
@@ -283,7 +279,7 @@ mod test {
         let dft = &tracing::info_span!("prepare dft")
             .in_scope(|| Radix2DFTSmallBatch::new(1 << (k - folding + rate)));
         let (proof, checkpoint_prover) = {
-            let poly: Poly<F, Eval> = Poly::rand(&mut rng, k);
+            let poly: Poly<F> = Poly::rand(&mut rng, k);
 
             let mut transcript = Writer::init("test");
             let data = whir.commit(dft, &mut transcript, &poly).unwrap();
@@ -384,7 +380,7 @@ mod test {
         let dft = &tracing::info_span!("prepare dft")
             .in_scope(|| Radix2DFTSmallBatch::new(1 << (k - folding + rate)));
         let (proof, checkpoint_prover) = {
-            let poly: Poly<F, Eval> = Poly::rand(&mut rng, k);
+            let poly: Poly<F> = Poly::rand(&mut rng, k);
 
             let mut transcript = Writer::init(challenger);
             let data = tracing::info_span!("commit")

@@ -1,4 +1,4 @@
-use crate::utils::{log2_strict, n_rand, unsafe_allocate_zero_vec, TwoAdicSlice};
+use crate::utils::{log2_strict, n_rand, unsafe_allocate_zero_vec};
 use itertools::Itertools;
 use p3_field::{ExtensionField, Field};
 use p3_matrix::{dense::DenseMatrix, util::reverse_matrix_index_bits};
@@ -8,7 +8,7 @@ use rayon::{
         IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator,
         ParallelIterator,
     },
-    slice::{ParallelSlice, ParallelSliceMut},
+    slice::ParallelSlice,
 };
 
 pub(crate) fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Point<Ext>) -> Ext {
@@ -106,64 +106,7 @@ impl<F: Field> Point<F> {
         self.iter().map(|&z| z.into()).collect_vec().into()
     }
 
-    pub(super) fn eval_poly_in_evals<BaseField: Field>(&self, poly: &[BaseField]) -> F
-    where
-        F: ExtensionField<BaseField>,
-    {
-        let constant = (poly.len() == 1).then_some(*poly.first().unwrap());
-        if let Some(constant) = constant {
-            return constant.into();
-        }
-
-        let (z0, z1) = self.split_at(self.len() / 2);
-        let left = z0.eq(F::ONE);
-        let right = z1.eq(F::ONE);
-
-        assert_eq!(poly.k(), left.k() + right.k());
-        poly.par_chunks(left.len())
-            .zip_eq(right.par_iter())
-            .map(|(part, &c)| {
-                part.iter()
-                    .zip_eq(left.iter())
-                    .map(|(&a, &b)| b * a)
-                    .sum::<F>()
-                    * c
-            })
-            .sum()
-    }
-
-    pub(super) fn eval_poly_in_coeffs<BaseField: Field>(&self, poly: &[BaseField]) -> F
-    where
-        F: ExtensionField<BaseField>,
-    {
-        let constant = (poly.len() == 1).then_some(*poly.first().unwrap());
-        if let Some(constant) = constant {
-            return constant.into();
-        }
-
-        let k = poly.k();
-        assert_eq!(k, self.len());
-
-        let mut buf = unsafe_allocate_zero_vec(1 << (k - 1));
-        buf[0] = F::ONE;
-        let mut sum = (*poly.first().unwrap()).into();
-        for (i, &zi) in self.iter().enumerate() {
-            sum += buf
-                .par_iter()
-                .zip(poly.par_iter().skip(1 << i))
-                .take(1 << i)
-                .map(|(&u0, &u1)| u0 * u1)
-                .sum::<F>()
-                * zi;
-            let (lo, hi) = buf.split_at_mut(1 << i);
-            lo.par_iter_mut()
-                .zip(hi.par_iter_mut())
-                .for_each(|(lo, hi)| *hi = *lo * zi);
-        }
-        sum
-    }
-
-    pub fn eq(&self, scale: F) -> Poly<F, Eval> {
+    pub fn eq(&self, scale: F) -> Poly<F> {
         if self.is_empty() {
             return vec![F::ONE].into();
         }
@@ -184,50 +127,33 @@ impl<F: Field> Point<F> {
     }
 }
 
-pub trait Basis: Default {}
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Poly<F>(Vec<F>);
 
-#[derive(Debug, Clone, Default, Eq, PartialEq)]
-pub struct Coeff {}
-
-#[derive(Debug, Clone, Default, Eq, PartialEq)]
-pub struct Eval {}
-
-impl Basis for Coeff {}
-impl Basis for Eval {}
-
-#[derive(Debug, Clone, Default, Eq, PartialEq)]
-pub struct Poly<F, Basis> {
-    pub values: Vec<F>,
-    pub basis: Basis,
-}
-
-impl<F, Basis> std::ops::Deref for Poly<F, Basis> {
+impl<F> std::ops::Deref for Poly<F> {
     type Target = Vec<F>;
     fn deref(&self) -> &Self::Target {
-        &self.values
+        &self.0
     }
 }
 
-impl<F, Basis> std::ops::DerefMut for Poly<F, Basis> {
+impl<F> std::ops::DerefMut for Poly<F> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.values
+        &mut self.0
     }
 }
 
-impl<F: Field, B: Basis, I: IntoIterator<Item = F>> From<I> for Poly<F, B> {
+impl<F: Field, I: IntoIterator<Item = F>> From<I> for Poly<F> {
     fn from(values: I) -> Self {
         Self::new(values.into_iter().collect::<Vec<_>>())
     }
 }
 
-impl<F: Field, B: Basis> Poly<F, B> {
+impl<F: Field> Poly<F> {
     pub fn new(values: Vec<F>) -> Self {
         assert!(!values.is_empty());
         assert!(values.len().is_power_of_two());
-        Self {
-            values,
-            basis: B::default(),
-        }
+        Self(values)
     }
 
     pub fn rand(rng: &mut impl rand::Rng, k: usize) -> Self
@@ -238,10 +164,7 @@ impl<F: Field, B: Basis> Poly<F, B> {
     }
 
     pub fn zero(k: usize) -> Self {
-        Self {
-            values: unsafe_allocate_zero_vec(1 << k),
-            basis: B::default(),
-        }
+        Self(unsafe_allocate_zero_vec(1 << k))
     }
 
     pub fn k(&self) -> usize {
@@ -252,88 +175,39 @@ impl<F: Field, B: Basis> Poly<F, B> {
         (self.len() == 1).then_some(*self.first().unwrap())
     }
 
-    pub fn values(&self) -> &[F] {
-        &self.values
-    }
-
     pub fn reverse_index_bits(self) -> Self {
-        let mut mat = DenseMatrix::new(self.values, 1);
+        let mut mat = DenseMatrix::new(self.0, 1);
         reverse_matrix_index_bits(&mut mat);
         mat.values.into()
     }
 }
 
-impl<F: Field> Poly<F, Coeff> {
-    pub fn to_evals(mut self) -> Poly<F, Eval> {
-        self.par_chunks_mut(2)
-            .for_each(|chunk| chunk[1] += chunk[0]);
-
-        for i in 2..=self.k() {
-            let chunk_size = 1 << i;
-            self.par_chunks_mut(chunk_size).for_each(|chunk| {
-                let mid = chunk_size >> 1;
-                (mid..chunk_size).for_each(|j| chunk[j] += chunk[j - mid]);
-            });
-        }
-
-        Poly {
-            values: self.values,
-            basis: Eval {},
-        }
-    }
-
+impl<F: Field> Poly<F> {
     pub fn eval<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
-        point.eval_poly_in_coeffs(self)
+        let constant = (self.len() == 1).then_some(*self.first().unwrap());
+        if let Some(constant) = constant {
+            return constant.into();
+        }
+
+        let (z0, z1) = point.split_at(point.len() / 2);
+        let left = z0.eq(Ext::ONE);
+        let right = z1.eq(Ext::ONE);
+
+        assert_eq!(self.k(), left.k() + right.k());
+        self.par_chunks(left.len())
+            .zip_eq(right.par_iter())
+            .map(|(part, &c)| {
+                part.iter()
+                    .zip_eq(left.iter())
+                    .map(|(&a, &b)| b * a)
+                    .sum::<Ext>()
+                    * c
+            })
+            .sum()
     }
 
     pub fn eval_univariate<Ext: ExtensionField<F>>(&self, point: Ext) -> Ext {
-        crate::utils::par_horner(&self.values, point)
-    }
-
-    pub fn fix_var_mut(&mut self, zi: F) {
-        let mid = self.len() / 2;
-        let (p0, p1) = self.split_at_mut(mid);
-        p0.par_iter_mut()
-            .zip(p1.par_iter())
-            .for_each(|(a0, &a1)| *a0 += zi * a1);
-        self.truncate(mid);
-    }
-
-    pub fn fix_var<Ext: ExtensionField<F>>(&self, zi: Ext) -> Poly<Ext, Coeff> {
-        let (p0, p1) = self.split_at(self.len() / 2);
-        p0.par_iter()
-            .zip(p1.par_iter())
-            .map(|(&a0, &a1)| zi * a1 + a0)
-            .collect::<Vec<_>>()
-            .into()
-    }
-}
-
-impl<F: Field> Poly<F, Eval> {
-    pub fn to_coeffs(mut self) -> Poly<F, Coeff> {
-        self.par_chunks_mut(2)
-            .for_each(|chunk| chunk[1] -= chunk[0]);
-
-        for i in 2..=self.k() {
-            let chunk_size = 1 << i;
-            self.par_chunks_mut(chunk_size).for_each(|chunk| {
-                let mid = chunk_size >> 1;
-                (mid..chunk_size).for_each(|j| chunk[j] -= chunk[j - mid]);
-            });
-        }
-
-        Poly {
-            values: self.values,
-            basis: Coeff {},
-        }
-    }
-
-    pub fn eval<Ext: ExtensionField<F>>(&self, point: &Point<Ext>) -> Ext {
-        point.eval_poly_in_evals(self)
-    }
-
-    pub fn eval_univariate<Ext: ExtensionField<F>>(&self, point: Ext) -> Ext {
-        crate::utils::par_horner(&self.values, point)
+        crate::utils::par_horner(self, point)
     }
 
     pub fn fix_var_mut(&mut self, zi: F) {
@@ -345,7 +219,7 @@ impl<F: Field> Poly<F, Eval> {
         self.truncate(mid);
     }
 
-    pub fn fix_var<Ext: ExtensionField<F>>(&self, zi: Ext) -> Poly<Ext, Eval> {
+    pub fn fix_var<Ext: ExtensionField<F>>(&self, zi: Ext) -> Poly<Ext> {
         let (p0, p1) = self.split_at(self.len() / 2);
         p0.par_iter()
             .zip(p1.par_iter())
@@ -357,35 +231,11 @@ impl<F: Field> Poly<F, Eval> {
 
 #[cfg(test)]
 mod test {
-
-    use crate::poly::{Eval, Point, Poly};
-    use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
+    use crate::poly::{Point, Poly};
     use p3_field::extension::BinomialExtensionField;
     use p3_field::PrimeCharacteristicRing;
-    use p3_matrix::dense::RowMajorMatrix;
-    use rand::Rng;
-
     type F = p3_koala_bear::KoalaBear;
     type Ext = BinomialExtensionField<F, 4>;
-
-    #[test]
-    #[ignore]
-    fn test_bench_eval() {
-        let mut rng = crate::test::rng(1);
-        let k = 25;
-        let poly0 = Poly::<F, Eval>::rand(&mut rng, k);
-        let poly1 = poly0.clone().to_coeffs();
-
-        let var: F = rng.random();
-        let point = Point::<F>::expand(k, var);
-
-        crate::test::init_tracing();
-        let e0 = tracing::info_span!("e0").in_scope(|| poly0.eval(&point));
-        let e1 = tracing::info_span!("e1").in_scope(|| poly1.eval(&point));
-        assert_eq!(e0, e1);
-        let e1 = tracing::info_span!("e1").in_scope(|| poly1.eval_univariate(var));
-        assert_eq!(e0, e1);
-    }
 
     #[test]
     fn test_eq() {
@@ -405,25 +255,15 @@ mod test {
         let mut rng = crate::test::rng(1);
 
         for k in 1..10 {
-            let poly_in_evals = Poly::<F, Eval>::rand(&mut rng, k);
-            let poly_in_coeffs = poly_in_evals.clone().to_coeffs();
-            assert_eq!(poly_in_evals, poly_in_coeffs.clone().to_evals());
+            let poly = Poly::<F>::rand(&mut rng, k);
 
             for i in 0..(1 << k) {
-                let e0 = poly_in_evals[i];
+                let e0 = poly[i];
                 let point = Point::<F>::hypercube(i, k);
-                assert_eq!(e0, poly_in_coeffs.eval(&point));
-                assert_eq!(e0, poly_in_evals.eval(&point));
+                assert_eq!(e0, poly.eval(&point));
 
                 {
-                    let mut poly = poly_in_evals.clone();
-                    point.iter().rev().for_each(|&var| poly.fix_var_mut(var));
-                    let e1 = poly.constant().unwrap();
-                    assert_eq!(e0, e1);
-                }
-
-                {
-                    let mut poly = poly_in_coeffs.clone();
+                    let mut poly = poly.clone();
                     point.iter().rev().for_each(|&var| poly.fix_var_mut(var));
                     let e1 = poly.constant().unwrap();
                     assert_eq!(e0, e1);
@@ -431,11 +271,10 @@ mod test {
             }
 
             let point = Point::<Ext>::rand(&mut rng, k);
-            let e0 = poly_in_coeffs.eval(&point);
-            assert_eq!(e0, poly_in_evals.eval(&point));
+            let e0 = poly.eval(&point);
 
             {
-                let mut poly = poly_in_evals.fix_var(*point.last().unwrap());
+                let mut poly = poly.fix_var(*point.last().unwrap());
                 point
                     .iter()
                     .rev()
@@ -447,19 +286,7 @@ mod test {
             }
 
             {
-                let mut poly = poly_in_coeffs.fix_var(*point.last().unwrap());
-                point
-                    .iter()
-                    .rev()
-                    .skip(1)
-                    .for_each(|&var| poly.fix_var_mut(var));
-
-                let e1 = poly.constant().unwrap();
-                assert_eq!(e0, e1);
-            }
-
-            {
-                let e1 = poly_in_evals
+                let e1 = poly
                     .iter()
                     .zip(point.eq(Ext::ONE).iter())
                     .map(|(&coeff, &eq)| eq * coeff)
@@ -467,38 +294,5 @@ mod test {
                 assert_eq!(e0, e1);
             }
         }
-    }
-
-    #[test]
-    fn test_domain() {
-        use p3_field::TwoAdicField;
-
-        let mut rng = &mut crate::test::rng(1);
-        let k = 4usize;
-
-        let poly: Poly<F, Eval> = Poly::rand(&mut rng, k);
-        let poly_in_coeffs = poly.clone().to_coeffs();
-        let extend = 3;
-        let rate = poly.k() + extend;
-
-        let size = 1 << rate;
-        let mut padded: Vec<F> = crate::utils::unsafe_allocate_zero_vec(size);
-        padded[..poly.len()].copy_from_slice(&poly);
-
-        let mat = RowMajorMatrix::new(padded.clone(), 1);
-
-        let cw = Radix2DitParallel::default().dft_algebra_batch(mat);
-        let cw = &cw.values;
-
-        let omega = F::two_adic_generator(rate);
-        cw.iter().enumerate().for_each(|(i, &cw_i)| {
-            let wi = omega.exp_u64(i as u64);
-            let ei = poly.eval_univariate(wi);
-            assert_eq!(ei, cw_i);
-            let point = Point::<F>::expand(poly.k(), wi);
-            let u0 = poly.eval(&point);
-            let u1 = poly_in_coeffs.eval_univariate::<F>(wi);
-            assert_eq!(u0, u1);
-        });
     }
 }
