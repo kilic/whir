@@ -29,7 +29,8 @@ where
     Transcript: Writer<<MT::MerkleData as MerkleData>::Digest>,
 {
     let width = 1 << (poly.k() - folding);
-    let mut mat = RowMajorMatrixView::new(poly, width).transpose();
+    let mut mat = tracing::info_span!("transpose")
+        .in_scope(|| RowMajorMatrixView::new(poly, width).transpose());
     mat.pad_to_height(1 << (poly.k() + rate - folding), F::ZERO);
     let codeword = tracing::info_span!("dft-base", height = mat.height(), width = mat.width())
         .in_scope(|| dft.dft_batch(mat).to_row_major_matrix());
@@ -55,7 +56,8 @@ where
     Transcript: Writer<<MT::MerkleData as MerkleData>::Digest>,
 {
     let width = 1 << (poly.k() - folding);
-    let mut mat = RowMajorMatrixView::new(poly, width).transpose();
+    let mut mat = tracing::info_span!("transpose")
+        .in_scope(|| RowMajorMatrixView::new(poly, width).transpose());
     mat.pad_to_height(1 << (poly.k() + rate - folding), Ext::ZERO);
     let codeword = tracing::info_span!("dft-ext", h = mat.height(), w = mat.width())
         .in_scope(|| dft.dft_algebra_batch(mat));
