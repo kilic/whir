@@ -62,6 +62,7 @@ pub struct Sumcheck<F: Field, Ext: ExtensionField<F>> {
     pub rs: Point<Ext>,
     pub weights: Poly<Ext>,
     pub poly: Poly<Ext>,
+    pub alpha: Ext,
     _marker: std::marker::PhantomData<F>,
 }
 
@@ -74,7 +75,6 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
     pub fn new<Transcript>(
         transcript: &mut Transcript,
         d: usize,
-        alpha: Ext,
         eq_claims: &[EqClaim<Ext, Ext>],
         poly: &Poly<F>,
     ) -> Result<Self, crate::Error>
@@ -88,6 +88,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
 
         let mut weights: Poly<Ext> = Poly::zero(k);
         let mut sum = Ext::ZERO;
+        let alpha = transcript.draw();
         compress_claims(&mut weights, &mut sum, alpha, eq_claims, &[]);
 
         // first round
@@ -123,6 +124,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
             rs,
             weights,
             poly,
+            alpha,
             _marker: std::marker::PhantomData,
         })
     }
@@ -133,18 +135,19 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         &mut self,
         transcript: &mut Transcript,
         d: usize,
-        alpha: Ext,
         eq_claims: &[EqClaim<Ext, Ext>],
         pow_claims: &[PowClaim<F, Ext>],
     ) -> Result<Point<Ext>, crate::Error>
     where
         Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
     {
+        // draw constraint combination challenge
+        self.alpha = transcript.draw();
         // contribute new claims
         compress_claims(
             &mut self.weights,
             &mut self.sum,
-            alpha,
+            self.alpha,
             eq_claims,
             pow_claims,
         );
@@ -262,7 +265,6 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
         &mut self,
         transcript: &mut Transcript,
         d: usize,
-        alpha: Ext,
         eq_claims: &[EqClaim<Ext, Ext>],
         pow_claims: &[PowClaim<F, Ext>],
     ) -> Result<Point<Ext>, crate::Error>
@@ -272,6 +274,7 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
         eq_claims.iter().for_each(|o| assert_eq!(o.k(), self.k));
         pow_claims.iter().for_each(|o| assert_eq!(o.k, self.k));
 
+        let alpha: Ext = transcript.draw();
         // update sum
         self.sum += eq_claims
             .iter()
@@ -365,15 +368,8 @@ mod test {
                     let eq_claims =
                         make_eq_claims_ext::<_, F, F, Ext>(&mut transcript, n_eqs, &poly).unwrap();
 
-                    let alpha = Challenge::<F, Ext>::draw(&mut transcript);
-                    let sc = super::Sumcheck::<F, Ext>::new(
-                        &mut transcript,
-                        d,
-                        alpha,
-                        &eq_claims,
-                        &poly,
-                    )
-                    .unwrap();
+                    let sc = super::Sumcheck::<F, Ext>::new(&mut transcript, d, &eq_claims, &poly)
+                        .unwrap();
 
                     assert_eq!(sc.k(), k - d);
 
@@ -383,7 +379,7 @@ mod test {
                             eq_points,
                             vec![],
                             sc.rs.clone(),
-                            alpha,
+                            sc.alpha,
                         );
                         assert_eq!(round.weights(&sc.poly), sc.sum);
                     }
@@ -401,9 +397,8 @@ mod test {
                     let pow_claims_ext =
                         get_pow_claims_base::<_, F, Ext>(&mut transcript, k, 0).unwrap();
                     let mut verifier = super::SumcheckVerifier::<F, Ext>::new(k);
-                    let alpha = Challenge::<F, Ext>::draw(&mut transcript);
                     verifier
-                        .fold(&mut transcript, d, alpha, &eq_claims_ext, &pow_claims_ext)
+                        .fold(&mut transcript, d, &eq_claims_ext, &pow_claims_ext)
                         .unwrap();
                     verifier.finalize(&mut transcript, None).unwrap();
                     transcript.draw()
@@ -449,11 +444,8 @@ mod test {
                             k_folding -= d;
                             round += d;
 
-                            let alpha = Challenge::<F, Ext>::draw(&mut transcript);
-
-                            let sc =
-                                super::Sumcheck::new(&mut transcript, d, alpha, &eq_claims, &poly)
-                                    .unwrap();
+                            let sc = super::Sumcheck::new(&mut transcript, d, &eq_claims, &poly)
+                                .unwrap();
 
                             assert_eq!(sc.k(), k_folding);
                             assert_eq!(k - sc.k(), round);
@@ -464,7 +456,7 @@ mod test {
                                 eq_points,
                                 vec![],
                                 sc.rs.clone(),
-                                alpha,
+                                sc.alpha,
                             );
 
                             assert_eq!(round.weights(&sc.poly), sc.sum);
@@ -494,9 +486,8 @@ mod test {
                                 )
                                 .unwrap();
 
-                                let alpha = Challenge::<F, Ext>::draw(&mut transcript);
                                 let rs = sc
-                                    .fold(&mut transcript, d, alpha, &eq_claims, &pow_claims)
+                                    .fold(&mut transcript, d, &eq_claims, &pow_claims)
                                     .unwrap();
 
                                 assert_eq!(sc.k(), k_folding);
@@ -512,7 +503,7 @@ mod test {
                                         pow_claims.iter().map(PowClaim::point).collect::<Vec<_>>();
 
                                     rounds.push(super::MultiRound::<F, Ext>::new(
-                                        eq_points, pow_points, rs, alpha,
+                                        eq_points, pow_points, rs, sc.alpha,
                                     ));
                                 }
 
@@ -556,9 +547,8 @@ mod test {
                                     )
                                     .unwrap();
 
-                                let alpha = Challenge::<F, Ext>::draw(&mut transcript);
                                 verifier
-                                    .fold(&mut transcript, d, alpha, &eq_claims, &pow_claims)
+                                    .fold(&mut transcript, d, &eq_claims, &pow_claims)
                                     .unwrap();
                             },
                         );

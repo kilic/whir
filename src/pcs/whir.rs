@@ -202,11 +202,9 @@ impl<
         // concat original claims with ood claims
         let claims = itertools::chain!(claims, ood_claims).collect::<Vec<_>>();
 
-        // draw sumcheck constraint combination challenge
-        let alpha = Challenge::draw(transcript);
         // initialize the sumcheck instance
         // `self.folding` number of rounds is run
-        let mut sumcheck = Sumcheck::new(transcript, self.folding, alpha, &claims, &poly)?;
+        let mut sumcheck = Sumcheck::new(transcript, self.folding, &claims, &poly)?;
 
         // derive number of rounds
         let (n_rounds, final_sumcheck_rounds) = compute_number_of_rounds(self.folding, self.k);
@@ -288,24 +286,15 @@ impl<
                         .zip(vars.iter())
                         .map(|(local_poly, &var)| {
                             let eval = Poly::new(local_poly.to_vec()).eval(&round_point.reversed());
-
                             debug_assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
-
                             PowClaim::new(var, eval, sumcheck.k())
                         })
                         .collect::<Vec<_>>()
                 };
 
-                // draw combination challenge and run next rounds of sumcheck
-                let alpha = Challenge::draw(transcript);
                 // run sumcheck rounds and update the round point
-                round_point = Some(sumcheck.fold(
-                    transcript,
-                    self.folding,
-                    alpha,
-                    &ood_claims,
-                    &stir_claims,
-                )?);
+                round_point =
+                    Some(sumcheck.fold(transcript, self.folding, &ood_claims, &stir_claims)?);
                 round_data = Some(_round_data);
                 Ok(())
             })?;
@@ -389,11 +378,8 @@ impl<
         // create the sumcheck verifier
         let mut sumcheck = SumcheckVerifier::<F, Ext>::new(self.k);
 
-        // draw the combination challenge and run the first set of sumcheck rounds
-        let alpha = Challenge::draw(transcript);
-
         // run first set of sumcheck rounds
-        let mut round_point = sumcheck.fold(transcript, self.folding, alpha, &claims, &[])?;
+        let mut round_point = sumcheck.fold(transcript, self.folding, &claims, &[])?;
 
         // round commitment is used validate stir points in the next set of rounds
         let mut round_comm: Option<<MTExt::MerkleData as MerkleData>::Digest> = None;
@@ -474,11 +460,8 @@ impl<
             // update the round commitment
             round_comm = Some(_round_comm);
 
-            // draw the combination challenge
-            let alpha = Challenge::draw(transcript);
             // run current set of sumcheck rounds
-            round_point =
-                sumcheck.fold(transcript, self.folding, alpha, &ood_claims, &stir_claims)?;
+            round_point = sumcheck.fold(transcript, self.folding, &ood_claims, &stir_claims)?;
         }
 
         // read the final polynomial
