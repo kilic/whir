@@ -79,7 +79,7 @@ mod test {
     use p3_dft::{Radix2DFTSmallBatch, TwoAdicSubgroupDft};
     use p3_field::{extension::BinomialExtensionField, ExtensionField, Field, TwoAdicField};
     use p3_koala_bear::Poseidon2KoalaBear;
-    use p3_matrix::dense::RowMajorMatrixView;
+    use p3_matrix::{dense::RowMajorMatrixView, Matrix};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
     use rand::{
         distr::{Distribution, StandardUniform},
@@ -95,7 +95,7 @@ mod test {
         pub fn encode<F: TwoAdicField>(poly: &Poly<F>, rate: usize, folding: usize) -> Poly<F> {
             let width = 1 << (poly.k() - folding);
             let mut mat = RowMajorMatrixView::new(poly, width).transpose();
-            mat.pad_to_height(1 << (poly.k() + rate - folding), F::ZERO);
+            mat.pad_to_height(1 << (poly.k() - folding + rate), F::ZERO);
             Radix2DFTSmallBatch::<F>::default()
                 .dft_batch(mat)
                 .values
@@ -156,6 +156,85 @@ mod test {
                     assert_eq!(y0, y1);
                     let local_poly = query(i, folding, &f0_cw);
                     assert_eq!(y0, local_poly.eval(&alpha.reversed()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_simple_whir_no_transpose() {
+        type F = p3_goldilocks::Goldilocks;
+        use p3_field::PrimeCharacteristicRing;
+        use p3_field::TwoAdicField;
+
+        pub fn encode<F: TwoAdicField>(poly: &Poly<F>, rate: usize, folding: usize) -> Poly<F> {
+            let width = 1 << folding;
+            let mut mat = RowMajorMatrixView::new(poly, width).to_row_major_matrix();
+            mat.pad_to_height(1 << (poly.k() - folding + rate), F::ZERO);
+            Radix2DFTSmallBatch::<F>::default()
+                .dft_batch(mat)
+                .values
+                .into()
+        }
+        // should be equivalent:
+        // pub fn encode<F: TwoAdicField>(poly: &Poly<F>, rate: usize, folding: usize) -> Poly<F> {
+        //     let mut padded = F::zero_vec(poly.len() * (1 << rate));
+        //     padded[..poly.len()].copy_from_slice(poly.as_slice());
+        //     let padded = RowMajorMatrix::new(padded, 1 << folding);
+        //     Radix2DFTSmallBatch::<F>::default()
+        //         .dft_batch(padded)
+        //         .values
+        //         .into()
+        // }
+
+        fn fold_reversed<F: TwoAdicField>(r: &Point<F>, evals: &Poly<F>) -> Poly<F> {
+            let mut evals = evals.clone().reverse_index_bits();
+            r.iter().for_each(|&r| evals.fix_var_mut(r));
+            evals.reverse_index_bits()
+        }
+
+        fn query(i: usize, folding: usize, cw: &Poly<F>) -> Poly<F> {
+            cw[i << folding..(i + 1) << folding].to_vec().into()
+        }
+
+        let mut rng = &mut crate::test::rng(1);
+
+        let k = 5usize;
+        let f0 = Poly::<F>::rand(&mut rng, k);
+
+        {
+            let var: F = rng.random();
+            let z = Point::<F>::expand(f0.k(), var);
+            let y = f0.eval(&z);
+            let eq = z.eq(F::ONE);
+
+            let mut acc = F::ZERO;
+            for i in 0..1 << k {
+                let point = Point::<F>::hypercube(i, k);
+                acc += f0.eval(&point) * eq.eval(&point);
+            }
+            assert_eq!(y, acc);
+        }
+
+        for folding in 0..k {
+            for rate in 0..k {
+                let alpha = Point::<F>::rand(&mut rng, folding);
+                let f1 = fold_reversed(&alpha, &f0);
+                let f0_cw = encode(&f0, rate, folding);
+
+                let f1_cw = fold_reversed(&alpha, &f0_cw);
+                assert_eq!(f1_cw, encode(&f1, rate, 0));
+
+                let k_domain = k + rate - folding;
+                let omega = F::two_adic_generator(k_domain);
+
+                for i in 0..k_domain {
+                    let z = omega.exp_u64(i as u64);
+                    let y0 = f1.eval_univariate(z);
+                    let y1 = f1_cw[i];
+                    assert_eq!(y0, y1);
+                    let local_poly = query(i, folding, &f0_cw);
+                    assert_eq!(y0, local_poly.eval(&alpha));
                 }
             }
         }
