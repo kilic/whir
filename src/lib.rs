@@ -4,6 +4,7 @@ pub mod pcs;
 pub mod poly;
 pub mod transcript;
 pub mod utils;
+pub mod study;
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum Error {

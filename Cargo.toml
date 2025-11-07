@@ -52,3 +52,7 @@ parallel = ["p3-maybe-rayon/parallel", "p3-util/parallel", "p3-dft/parallel"]
 [[bench]]
 harness = false
 name = "commit"
+
+[[bench]]
+harness = false
+name = "eq"
