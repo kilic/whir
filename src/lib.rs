@@ -2,6 +2,7 @@ pub mod field;
 pub mod merkle;
 pub mod pcs;
 pub mod poly;
+pub mod study;
 pub mod transcript;
 pub mod utils;
 
@@ -37,5 +38,32 @@ pub mod test {
             .with(env_filter)
             .with(ForestLayer::default())
             .init();
+    }
+
+    pub(crate) fn bench<F, T>(name: &str, n_iter: usize, expected: Option<&T>, f: F)
+    where
+        F: Fn() -> T,
+        T: PartialEq + std::fmt::Debug,
+    {
+        let mut lowest = std::time::Duration::MAX;
+        let mut total = std::time::Duration::default();
+
+        for _ in 0..n_iter {
+            let start = std::time::Instant::now();
+            let result = std::hint::black_box(f());
+            let this_time = start.elapsed();
+            lowest = lowest.min(this_time);
+            total += this_time;
+
+            if let Some(expected) = expected {
+                assert_eq!(*expected, result, "{name}");
+            }
+        }
+
+        let avg = total / n_iter as u32;
+        println!(
+            "{:20} N: {n_iter} Total: {:8.2?} Avg: {:8.2?} Lowest: {:8.2?}",
+            name, total, avg, lowest
+        );
     }
 }
