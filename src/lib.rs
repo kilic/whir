@@ -62,8 +62,8 @@ pub mod test {
 
         let avg = total / n_iter as u32;
         println!(
-            "{:20} N: {n_iter} Total: {:8.2?} Avg: {:8.2?} Lowest: {:8.2?}",
-            name, total, avg, lowest
+            "{:20} N: {n_iter} Avg: {:8.2?} Lowest: {:8.2?}",
+            name, avg, lowest
         );
     }
 }
