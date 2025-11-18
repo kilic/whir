@@ -3,10 +3,9 @@ use crate::{
     utils::{log2_strict, TwoAdicSlice},
 };
 use itertools::Itertools;
-use p3_field::{dot_product, Algebra, ExtensionField, Field, PackedFieldExtension, PackedValue};
-use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixView};
-use p3_matrix::Matrix;
-use p3_multilinear_util::eq_batch::eval_eq_batch;
+use p3_field::{dot_product, ExtensionField, Field, PackedFieldExtension, PackedValue};
+use p3_matrix::dense::RowMajorMatrixView;
+use p3_multilinear_util::eq_batch::{eval_eq_base_batch, eval_eq_batch};
 use rayon::prelude::*;
 
 #[tracing::instrument(skip_all)]
@@ -42,8 +41,6 @@ fn packed_flat_eqs<F: Field, Ext: ExtensionField<F>>(
     let n = points.len();
 
     let alphas = alpha.powers().take(n).collect();
-    let mut acc_packed: Vec<Ext::ExtensionPacking> =
-        crate::utils::unsafe_allocate_zero_vec((1 << (k - k_pack)) * n);
     let mut acc_init: Vec<Ext> = crate::utils::unsafe_allocate_zero_vec((1 << k_pack) * n);
     acc_init[..n].copy_from_slice(&alphas);
 
@@ -68,6 +65,10 @@ fn packed_flat_eqs<F: Field, Ext: ExtensionField<F>>(
         acc_init.len() / F::Packing::WIDTH,
         F::Packing::WIDTH,
     );
+
+    let mut acc_packed: Vec<Ext::ExtensionPacking> =
+        crate::utils::unsafe_allocate_zero_vec((1 << (k - k_pack)) * n);
+
     acc_init_transposed
         .chunks(F::Packing::WIDTH)
         .zip(acc_packed.iter_mut())
@@ -143,16 +144,16 @@ pub fn eq_compress_split_packed<F: Field, Ext: ExtensionField<F>>(
     use p3_field::PackedFieldExtension;
 
     let n = points.len();
-    let z0s = points
+    let left = points
         .iter()
         .map(|point| point.split_at(split_at).0)
         .collect::<Vec<_>>();
-    let left_packed = packed_flat_eqs::<F, Ext>(&z0s, alpha);
-    let z1s = points
+    let left_packed = packed_flat_eqs::<F, Ext>(&left, alpha);
+    let right = points
         .iter()
         .map(|point| point.split_at(split_at).1)
         .collect::<Vec<_>>();
-    let right = flat_eqs(&z1s, Ext::ONE);
+    let right = flat_eqs(&right, Ext::ONE);
 
     out.par_chunks_mut(F::Packing::WIDTH * left_packed.len() / n)
         .zip_eq(right.par_chunks(n))
@@ -166,6 +167,40 @@ pub fn eq_compress_split_packed<F: Field, Ext: ExtensionField<F>>(
             out.iter_mut()
                 .zip_eq(Ext::ExtensionPacking::to_ext_iter(packed_out))
                 .for_each(|(out, val)| *out = val);
+        });
+}
+
+#[tracing::instrument(skip_all)]
+pub fn eq_compress_split_packed_packed<F: Field, Ext: ExtensionField<F>>(
+    out: &mut [Ext::ExtensionPacking],
+    points: &[Point<Ext>],
+    alpha: Ext,
+    split_at: usize,
+) {
+    let n = points.len();
+    let left = points
+        .iter()
+        .map(|point| point.split_at(split_at).0)
+        .collect::<Vec<_>>();
+    let left_packed = packed_flat_eqs::<F, Ext>(&left, alpha);
+    let right = points
+        .iter()
+        .map(|point| point.split_at(split_at).1)
+        .collect::<Vec<_>>();
+    let right = flat_eqs(&right, Ext::ONE);
+
+    out.par_chunks_mut(left_packed.len() / n)
+        .zip_eq(right.par_chunks(n))
+        .for_each(|(out, right)| {
+            out.iter_mut()
+                .zip(left_packed.chunks(n))
+                .for_each(|(out, left)| {
+                    *out = left
+                        .iter()
+                        .zip_eq(right.iter())
+                        .map(|(&left, &right)| left * right)
+                        .sum::<Ext::ExtensionPacking>();
+                });
         });
 }
 
@@ -226,7 +261,7 @@ pub fn eq_compress_p3<F: Field, Ext: ExtensionField<F>>(
     eval_eq_batch::<F, Ext, false>(flat_points.as_view(), out, &alphas);
 }
 
-pub fn eq_compress_recursive_0<F: Field, Ext: ExtensionField<F>>(
+pub fn eq_compress_recursive<F: Field, Ext: ExtensionField<F>>(
     out: &mut [Ext],
     points: &[Point<Ext>],
     alpha: Ext,
@@ -242,23 +277,23 @@ pub fn eq_compress_recursive_0<F: Field, Ext: ExtensionField<F>>(
     let alphas = alpha.powers().take(n).collect();
     let mut workspace = Ext::zero_vec(2 * k * n);
 
-    recursive_inner_0::<F, Ext>(out, &mut workspace, &alphas, &flat_points.values);
+    recursive_inner::<F, Ext>(out, &mut workspace, &alphas, &flat_points.values);
 }
 
-fn recursive_inner_0<F: Field, Ext: ExtensionField<F>>(
+fn recursive_inner<F: Field, Ext: ExtensionField<F>>(
     out: &mut [Ext],
     workspace: &mut [Ext],
-    scalars: &[Ext],
+    buffer: &[Ext],
     flat_points: &[Ext],
 ) {
     use crate::utils::TwoAdicSlice;
     let k = out.k();
-    let n = scalars.len();
-    debug_assert_eq!(k * scalars.len(), flat_points.len());
+    let n = buffer.len();
+    debug_assert_eq!(k * buffer.len(), flat_points.len());
 
     match k {
         0 => {
-            out[0] += scalars.iter().copied().sum::<Ext>();
+            out[0] += buffer.iter().copied().sum::<Ext>();
         }
         _ => {
             let (zs_cur, zs_rest) = flat_points.split_at(n);
@@ -266,7 +301,7 @@ fn recursive_inner_0<F: Field, Ext: ExtensionField<F>>(
             let (s1_buffer, next_workspace) = next_workspace.split_at_mut(n);
 
             for i in 0..n {
-                let s = scalars[i];
+                let s = buffer[i];
                 let z = zs_cur[i];
                 let s1 = s * z;
                 s1_buffer[i] = s1;
@@ -274,15 +309,16 @@ fn recursive_inner_0<F: Field, Ext: ExtensionField<F>>(
             }
 
             let (low, high) = out.split_at_mut(out.len() / 2);
-            recursive_inner_0::<F, Ext>(low, next_workspace, s0_buffer, zs_rest);
-            recursive_inner_0::<F, Ext>(high, next_workspace, s1_buffer, zs_rest);
+            recursive_inner::<F, Ext>(low, next_workspace, s0_buffer, zs_rest);
+            recursive_inner::<F, Ext>(high, next_workspace, s1_buffer, zs_rest);
         }
     }
 }
 
-pub fn eq_compress_recursive_7<F: Field, Ext: ExtensionField<F>>(
+#[tracing::instrument(skip_all)]
+pub fn eq_compress_base_p3<F: Field, Ext: ExtensionField<F>>(
     out: &mut [Ext],
-    points: &[Point<Ext>],
+    points: &[Point<F>],
     alpha: Ext,
 ) {
     let k = out.k();
@@ -294,45 +330,118 @@ pub fn eq_compress_recursive_7<F: Field, Ext: ExtensionField<F>>(
         .collect::<Vec<_>>();
     let flat_points = RowMajorMatrixView::new(&flat_points, k).transpose();
     let alphas = alpha.powers().take(n).collect();
-    let mut workspace = Ext::zero_vec((k + 1) * n);
-
-    recursive_inner_7::<F, Ext>(out, &mut workspace, &alphas, &flat_points.values);
+    eval_eq_base_batch::<F, Ext, false>(flat_points.as_view(), out, &alphas);
 }
+#[cfg(test)]
+mod test {
 
-fn recursive_inner_7<F: Field, Ext: ExtensionField<F>>(
-    out: &mut [Ext],
-    workspace: &mut [Ext],
-    scalars: &[Ext],
-    flat_points: &[Ext],
-) {
-    use crate::utils::TwoAdicSlice;
-    let k = out.k();
-    let n = scalars.len();
-    debug_assert_eq!(k * scalars.len(), flat_points.len());
+    use crate::test::unpack_ext;
 
-    match k {
-        0 => {
-            out[0] += scalars.iter().copied().sum::<Ext>();
+    use super::*;
+    use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+    use rand::Rng;
+    type F = p3_koala_bear::KoalaBear;
+    type Ext = BinomialExtensionField<F, 4>;
+    type ExtP = <Ext as ExtensionField<F>>::ExtensionPacking;
+
+    #[test]
+    fn bench_compress_eq_base() {
+        let mut rng = crate::test::rng(1);
+
+        let n_iter = 100;
+        // crate::test::init_tracing();
+
+        // for k in [2, 3, 4, 5, 6, 7, 8, 12, 15, 18] {
+        for k in [11, 18, 21] {
+            println!("--- **** k: {}", k);
+            for n in [1, 10, 100] {
+                println!("--- **** n: {}", n);
+                let points = (0..n)
+                    .map(|_| Point::<F>::rand(&mut rng, k))
+                    .collect::<Vec<_>>();
+
+                let alpha: Ext = rng.random();
+
+                let mut out_ref = Ext::zero_vec(1 << k);
+                eq_compress_base_p3(&mut out_ref, &points, alpha);
+
+                crate::test::bench(
+                    "p3",
+                    n_iter,
+                    || (),
+                    |_| Ext::zero_vec(1 << k),
+                    |_, out| eq_compress_base_p3(out, &points, alpha),
+                    |out, _| assert_eq!(out, out_ref),
+                );
+            }
         }
-        _ => {
-            let (zs_cur, zs_rest) = flat_points.split_at(n);
-            let (buffer, next_workspace) = workspace.split_at_mut(n);
-            let (low, high) = out.split_at_mut(out.len() / 2);
+    }
 
-            for i in 0..n {
-                buffer[i] = scalars[i] * zs_cur[i];
-            }
+    #[test]
+    fn bench_compress_eq_ext() {
+        let mut rng = crate::test::rng(1);
 
-            recursive_inner_7::<F, Ext>(high, next_workspace, buffer, zs_rest);
-            for i in 0..n {
-                buffer[i] = scalars[i] - buffer[i];
+        let n_iter = 100;
+        let k_pack = log2_strict(<F as Field>::Packing::WIDTH);
+        // crate::test::init_tracing();
+
+        // for k in [2, 3, 4, 5, 6, 7, 8, 12, 15, 18] {
+        for k in [11, 18, 21] {
+            println!("--- **** k: {}", k);
+            for n in [1, 2, 5, 10, 100] {
+                println!("--- **** n: {}", n);
+                let points = (0..n)
+                    .map(|_| Point::<Ext>::rand(&mut rng, k))
+                    .collect::<Vec<_>>();
+
+                let alpha: Ext = rng.random();
+
+                let mut out_ref = Ext::zero_vec(1 << k);
+                eq_compress_ref::<F, Ext>(&mut out_ref, &points, alpha);
+
+                crate::test::bench(
+                    "p3",
+                    n_iter,
+                    || (),
+                    |_| Ext::zero_vec(1 << k),
+                    |_, out| {
+                        eq_compress_p3::<F, Ext>(out, &points, alpha);
+                    },
+                    |out, _| assert_eq!(out, out_ref),
+                );
+
+                crate::test::bench(
+                    "split-par",
+                    n_iter,
+                    || (),
+                    |_| Ext::zero_vec(1 << k),
+                    |_, out| eq_compress_split::<F, Ext, true>(out, &points, alpha, k / 2),
+                    |out, _| assert_eq!(out, out_ref),
+                );
+
+                crate::test::bench(
+                    "split-packed",
+                    n_iter,
+                    || (),
+                    |_| Ext::zero_vec(1 << k),
+                    |_, out| eq_compress_split_packed::<F, Ext>(out, &points, alpha, k / 2),
+                    |out, _| assert_eq!(out, out_ref),
+                );
+
+                crate::test::bench(
+                    "split-packed-out",
+                    n_iter,
+                    || (),
+                    |_| ExtP::zero_vec(1 << (k - k_pack)),
+                    |_, out| eq_compress_split_packed_packed::<F, Ext>(out, &points, alpha, k / 2),
+                    |out, _| assert_eq!(unpack_ext::<F, Ext>(out), out_ref),
+                );
             }
-            recursive_inner_7::<F, Ext>(low, next_workspace, buffer, zs_rest);
         }
     }
 }
 
-// pub fn eq_compress_recursive_8<F: Field, Ext: ExtensionField<F>>(
+// pub fn eq_compress_recursive_lessmem<F: Field, Ext: ExtensionField<F>>(
 //     out: &mut [Ext],
 //     points: &[Point<Ext>],
 //     alpha: Ext,
@@ -347,13 +456,14 @@ fn recursive_inner_7<F: Field, Ext: ExtensionField<F>>(
 //     let flat_points = RowMajorMatrixView::new(&flat_points, k).transpose();
 //     let alphas = alpha.powers().take(n).collect();
 //     let mut workspace = Ext::zero_vec((k + 1) * n);
-//     workspace[0..alphas.len()].copy_from_slice(&alphas);
-//     recursive_inner_8::<F, Ext>(out, &mut workspace, &flat_points.values);
+
+//     recursive_inner_lessmem::<F, Ext>(out, &mut workspace, &alphas, &flat_points.values);
 // }
 
-// fn recursive_inner_8<F: Field, Ext: ExtensionField<F>>(
+// fn recursive_inner_lessmem<F: Field, Ext: ExtensionField<F>>(
 //     out: &mut [Ext],
 //     workspace: &mut [Ext],
+//     scalars: &[Ext],
 //     flat_points: &[Ext],
 // ) {
 //     use crate::utils::TwoAdicSlice;
@@ -368,302 +478,243 @@ fn recursive_inner_7<F: Field, Ext: ExtensionField<F>>(
 //         _ => {
 //             let (zs_cur, zs_rest) = flat_points.split_at(n);
 //             let (buffer, next_workspace) = workspace.split_at_mut(n);
-
 //             let (low, high) = out.split_at_mut(out.len() / 2);
 
 //             for i in 0..n {
 //                 buffer[i] = scalars[i] * zs_cur[i];
 //             }
-//             recursive_inner_8::<F, Ext>(high, next_workspace, buffer, zs_rest);
+
+//             recursive_inner_lessmem::<F, Ext>(high, next_workspace, buffer, zs_rest);
 //             for i in 0..n {
 //                 buffer[i] = scalars[i] - buffer[i];
 //             }
-//             recursive_inner_8::<F, Ext>(low, next_workspace, buffer, zs_rest);
+//             recursive_inner_lessmem::<F, Ext>(low, next_workspace, buffer, zs_rest);
 //         }
 //     }
 // }
 
-pub fn eq_compress_recursive_1<F: Field, Ext: ExtensionField<F>>(
-    out: &mut [Ext],
-    points: &[Point<Ext>],
-    alpha: Ext,
-) {
-    let k = out.k();
-    let n = points.len();
-    let flat_points = points
-        .iter()
-        .flat_map(|points| points.iter().rev())
-        .cloned()
-        .collect::<Vec<_>>();
-    let flat_points = RowMajorMatrixView::new(&flat_points, k).transpose();
-    let alphas = alpha.powers().take(n).collect();
-    let mut workspace = Ext::zero_vec(2 * k * n);
-    recursive_inner_1::<F, Ext>(flat_points.as_view(), &alphas, out, &mut workspace);
-}
+// pub fn eq_compress_recursive_packedout<F: Field, Ext: ExtensionField<F>>(
+//     out: &mut [Ext::ExtensionPacking],
+//     points: &[Point<Ext>],
+//     alpha: Ext,
+// ) {
+//     let k = out.k();
+//     let n = points.len();
+//     let flat_points = points
+//         .iter()
+//         .flat_map(|points| points.iter().rev())
+//         .cloned()
+//         .collect::<Vec<_>>();
+//     let flat_points = RowMajorMatrixView::new(&flat_points, k).transpose();
+//     let alphas = alpha.powers().take(n).collect();
+//     let mut workspace = Ext::zero_vec(2 * k * n);
+//     recursive_inner_packedout::<F, Ext>(out, &mut workspace, &alphas, &flat_points.values);
+// }
 
-fn recursive_inner_1<F: Field, Ext: ExtensionField<F>>(
-    points: RowMajorMatrixView<'_, Ext>,
-    scalars: &[Ext],
-    out: &mut [Ext],
-    workspace: &mut [Ext],
-) {
-    let num_vars = points.height();
-    let num_points = points.width();
-    debug_assert_eq!(out.len(), 1 << num_vars);
+// fn recursive_inner_packedout<F: Field, Ext: ExtensionField<F>>(
+//     out: &mut [Ext::ExtensionPacking],
+//     workspace: &mut [Ext],
+//     scalars: &[Ext],
+//     flat_points: &[Ext],
+// ) {
+//     use crate::utils::TwoAdicSlice;
+//     println!("x?");
+//     let k = out.k();
+//     println!("y?");
+//     let n = scalars.len();
+//     println!("z?");
+//     debug_assert_eq!(k * scalars.len(), flat_points.len());
+//     println!("oh no?");
 
-    #[inline(always)]
-    fn apply<F: Field, Other: Algebra<F> + Copy + Send + Sync>(
-        evals: &[Other],
-        row: &[Other],
-        buf0: &mut [Other],
-        buf1: &mut [Other],
-    ) {
-        debug_assert_eq!(evals.len(), row.len());
-        debug_assert_eq!(evals.len(), buf0.len());
-        debug_assert_eq!(evals.len(), buf1.len());
-        evals
-            .iter()
-            .zip(row.iter())
-            .zip(buf0.iter_mut().zip(buf1.iter_mut()))
-            .for_each(|((&sc, &el), (buf0, buf1))| {
-                let s1 = sc * el;
-                *buf0 = sc - s1;
-                *buf1 = s1;
-            });
-    }
+//     match k {
+//         0 => {
+//             println!("somehow?");
+//             out[0] += scalars.iter().copied().sum::<Ext>();
+//         }
+//         _ => {
+//             let (zs_cur, zs_rest) = flat_points.split_at(n);
+//             let (s0_buffer, next_workspace) = workspace.split_at_mut(n);
+//             let (s1_buffer, next_workspace) = next_workspace.split_at_mut(n);
 
-    #[inline(always)]
-    fn apply_basic_1<F: Field, Ext: ExtensionField<F>>(
-        evals: RowMajorMatrixView<'_, F>,
-        scalars: &[Ext],
-    ) -> [Ext; 2] {
-        debug_assert_eq!(evals.height(), 1);
-        debug_assert_eq!(evals.width(), scalars.len());
-        let sum: Ext = scalars.iter().cloned().sum();
-        let eq_1_sum: Ext = dot_product(scalars.iter().cloned(), evals.values.iter().copied());
-        let eq_0_sum = sum - eq_1_sum.clone();
-        [eq_0_sum, eq_1_sum]
-    }
+//             for i in 0..n {
+//                 let s = scalars[i];
+//                 let z = zs_cur[i];
+//                 let s1 = s * z;
+//                 s1_buffer[i] = s1;
+//                 s0_buffer[i] = s - s1;
+//             }
 
-    #[inline(always)]
-    fn apply_basic_2<F: Field, Ext: ExtensionField<F>>(
-        evals: RowMajorMatrixView<'_, Ext>,
-        scalars: &[Ext],
-        workspace: &mut [Ext],
-    ) -> [Ext; 4] {
-        debug_assert_eq!(evals.height(), 2);
-        debug_assert_eq!(evals.width(), scalars.len());
+//             let (low, high) = out.split_at_mut(out.len() / 2);
+//             recursive_inner_packedout::<F, Ext>(low, next_workspace, s0_buffer, zs_rest);
+//             recursive_inner_packedout::<F, Ext>(high, next_workspace, s1_buffer, zs_rest);
+//         }
+//     }
+// }
 
-        let (first_row, second_row) = evals.split_rows(1);
-        let num_points = evals.width();
+// fn recursive_inner_packedout_x<F: Field, Ext: ExtensionField<F>>(
+//     out: &mut [Ext::ExtensionPacking],
+//     workspace: &mut [Ext::ExtensionPacking],
+//     scalars: &[Ext],
+//     flat_points: &[Ext],
+// ) {
+//     use crate::utils::TwoAdicSlice;
+//     let k = out.k();
+//     let n = scalars.len();
+//     debug_assert_eq!(k * scalars.len(), flat_points.len());
 
-        let (eq_0s, remaining) = workspace.split_at_mut(num_points);
-        let eq_1s = &mut remaining[..num_points];
+//     match k {
+//         0 => {
+//             out[0] += scalars.iter().copied().sum::<Ext>();
+//         }
+//         _ => {
+//             let (zs_cur, zs_rest) = flat_points.split_at(n);
+//             let (s0_buffer, next_workspace) = workspace.split_at_mut(n);
+//             let (s1_buffer, next_workspace) = next_workspace.split_at_mut(n);
 
-        apply::<F, Ext>(scalars, first_row.values, eq_0s, eq_1s);
+//             for i in 0..n {
+//                 let s = scalars[i];
+//                 let z = zs_cur[i];
+//                 let s1 = s * z;
+//                 s1_buffer[i] = s1;
+//                 s0_buffer[i] = s - s1;
+//             }
 
-        let [eq_00, eq_01] = apply_basic_1(second_row, eq_0s);
-        let [eq_10, eq_11] = apply_basic_1(second_row, eq_1s);
+//             let (low, high) = out.split_at_mut(out.len() / 2);
+//             recursive_inner_packedout::<F, Ext>(low, next_workspace, s0_buffer, zs_rest);
+//             recursive_inner_packedout::<F, Ext>(high, next_workspace, s1_buffer, zs_rest);
+//         }
+//     }
+// }
 
-        [eq_00, eq_01, eq_10, eq_11]
-    }
+// pub fn eq_compress_recursive_1<F: Field, Ext: ExtensionField<F>>(
+//     out: &mut [Ext],
+//     points: &[Point<Ext>],
+//     alpha: Ext,
+// ) {
+//     let k = out.k();
+//     let n = points.len();
+//     let flat_points = points
+//         .iter()
+//         .flat_map(|points| points.iter().rev())
+//         .cloned()
+//         .collect::<Vec<_>>();
+//     let flat_points = RowMajorMatrixView::new(&flat_points, k).transpose();
+//     let alphas = alpha.powers().take(n).collect();
+//     let mut workspace = Ext::zero_vec(2 * k * n);
+//     recursive_inner_1::<F, Ext>(flat_points.as_view(), &alphas, out, &mut workspace);
+// }
 
-    match num_vars {
-        0 => {
-            out[0] = scalars.iter().copied().sum();
-        }
-        1 => {
-            out.copy_from_slice(&apply_basic_1(points, scalars));
-        }
-        2 => {
-            let eqs = apply_basic_2::<F, Ext>(points, scalars, workspace);
-            out.copy_from_slice(&eqs);
-        }
-        3 => {
-            debug_assert_eq!(points.height(), 3);
-            debug_assert_eq!(points.width(), scalars.len());
+// fn recursive_inner_1<F: Field, Ext: ExtensionField<F>>(
+//     points: RowMajorMatrixView<'_, Ext>,
+//     scalars: &[Ext],
+//     out: &mut [Ext],
+//     workspace: &mut [Ext],
+// ) {
+//     let num_vars = points.height();
+//     let num_points = points.width();
+//     debug_assert_eq!(out.len(), 1 << num_vars);
 
-            let (first_row, remainder) = points.split_rows(1);
-            let num_points = points.width();
+//     #[inline(always)]
+//     fn apply<F: Field, Other: Algebra<F> + Copy + Send + Sync>(
+//         evals: &[Other],
+//         row: &[Other],
+//         buf0: &mut [Other],
+//         buf1: &mut [Other],
+//     ) {
+//         debug_assert_eq!(evals.len(), row.len());
+//         debug_assert_eq!(evals.len(), buf0.len());
+//         debug_assert_eq!(evals.len(), buf1.len());
+//         evals
+//             .iter()
+//             .zip(row.iter())
+//             .zip(buf0.iter_mut().zip(buf1.iter_mut()))
+//             .for_each(|((&sc, &el), (buf0, buf1))| {
+//                 let s1 = sc * el;
+//                 *buf0 = sc - s1;
+//                 *buf1 = s1;
+//             });
+//     }
 
-            let (eq_0s, next_workspace) = workspace.split_at_mut(num_points);
-            let (eq_1s, next_workspace) = next_workspace.split_at_mut(num_points);
+//     #[inline(always)]
+//     fn apply_basic_1<F: Field, Ext: ExtensionField<F>>(
+//         evals: RowMajorMatrixView<'_, F>,
+//         scalars: &[Ext],
+//     ) -> [Ext; 2] {
+//         debug_assert_eq!(evals.height(), 1);
+//         debug_assert_eq!(evals.width(), scalars.len());
+//         let sum: Ext = scalars.iter().cloned().sum();
+//         let eq_1_sum: Ext = dot_product(scalars.iter().cloned(), evals.values.iter().copied());
+//         let eq_0_sum = sum - eq_1_sum.clone();
+//         [eq_0_sum, eq_1_sum]
+//     }
 
-            apply::<F, Ext>(scalars, first_row.values, eq_0s, eq_1s);
+//     #[inline(always)]
+//     fn apply_basic_2<F: Field, Ext: ExtensionField<F>>(
+//         evals: RowMajorMatrixView<'_, Ext>,
+//         scalars: &[Ext],
+//         workspace: &mut [Ext],
+//     ) -> [Ext; 4] {
+//         debug_assert_eq!(evals.height(), 2);
+//         debug_assert_eq!(evals.width(), scalars.len());
 
-            let (ws0, remaining) = next_workspace.split_at_mut(2 * num_points);
-            let ws1 = &mut remaining[..2 * num_points];
+//         let (first_row, second_row) = evals.split_rows(1);
+//         let num_points = evals.width();
 
-            let [eq_000, eq_001, eq_010, eq_011] = apply_basic_2::<F, Ext>(remainder, eq_0s, ws0);
-            let [eq_100, eq_101, eq_110, eq_111] = apply_basic_2::<F, Ext>(remainder, eq_1s, ws1);
+//         let (eq_0s, remaining) = workspace.split_at_mut(num_points);
+//         let eq_1s = &mut remaining[..num_points];
 
-            out.copy_from_slice(&[
-                eq_000, eq_001, eq_010, eq_011, eq_100, eq_101, eq_110, eq_111,
-            ]);
-        }
-        _ => {
-            let (low, high) = out.split_at_mut(out.len() / 2);
-            let (first_row, remainder) = points.split_rows(1);
+//         apply::<F, Ext>(scalars, first_row.values, eq_0s, eq_1s);
 
-            let (s0_buffer, next_workspace) = workspace.split_at_mut(num_points);
-            let (s1_buffer, next_workspace) = next_workspace.split_at_mut(num_points);
+//         let [eq_00, eq_01] = apply_basic_1(second_row, eq_0s);
+//         let [eq_10, eq_11] = apply_basic_1(second_row, eq_1s);
 
-            apply::<F, Ext>(scalars, first_row.values, s0_buffer, s1_buffer);
+//         [eq_00, eq_01, eq_10, eq_11]
+//     }
 
-            recursive_inner_1(remainder, s0_buffer, low, next_workspace);
-            recursive_inner_1(remainder, s1_buffer, high, next_workspace);
-        }
-    }
-}
+//     match num_vars {
+//         0 => {
+//             out[0] = scalars.iter().copied().sum();
+//         }
+//         1 => {
+//             out.copy_from_slice(&apply_basic_1(points, scalars));
+//         }
+//         2 => {
+//             let eqs = apply_basic_2::<F, Ext>(points, scalars, workspace);
+//             out.copy_from_slice(&eqs);
+//         }
+//         3 => {
+//             debug_assert_eq!(points.height(), 3);
+//             debug_assert_eq!(points.width(), scalars.len());
 
-#[tracing::instrument(skip_all)]
-pub fn eq_compress_split_packed_packed<F: Field, Ext: ExtensionField<F>>(
-    out: &mut [Ext::ExtensionPacking],
-    points: &[Point<Ext>],
-    alpha: Ext,
-    split_at: usize,
-) {
-    let n = points.len();
-    let left = points
-        .iter()
-        .map(|point| point.split_at(split_at).0)
-        .collect::<Vec<_>>();
-    let left_packed = packed_flat_eqs::<F, Ext>(&left, alpha);
-    let right = points
-        .iter()
-        .map(|point| point.split_at(split_at).1)
-        .collect::<Vec<_>>();
-    let right = flat_eqs(&right, Ext::ONE);
+//             let (first_row, remainder) = points.split_rows(1);
+//             let num_points = points.width();
 
-    out.par_chunks_mut(left_packed.len() / n)
-        .zip_eq(right.par_chunks(n))
-        .for_each(|(out, right)| {
-            out.iter_mut()
-                .zip(left_packed.chunks(n))
-                .for_each(|(out, left)| {
-                    *out = left
-                        .iter()
-                        .zip_eq(right.iter())
-                        .map(|(&left, &right)| left * right)
-                        .sum::<Ext::ExtensionPacking>();
-                });
-        });
-}
+//             let (eq_0s, next_workspace) = workspace.split_at_mut(num_points);
+//             let (eq_1s, next_workspace) = next_workspace.split_at_mut(num_points);
 
-#[cfg(test)]
-mod test {
+//             apply::<F, Ext>(scalars, first_row.values, eq_0s, eq_1s);
 
-    fn unpack_ext_packed<F: Field, Ext: ExtensionField<F>>(
-        packed: Vec<Ext::ExtensionPacking>,
-    ) -> Vec<Ext> {
-        Ext::ExtensionPacking::to_ext_iter(packed.into_iter()).collect()
-    }
+//             let (ws0, remaining) = next_workspace.split_at_mut(2 * num_points);
+//             let ws1 = &mut remaining[..2 * num_points];
 
-    use super::*;
-    use p3_field::{
-        extension::{BinomialExtensionField, PackedBinomialExtensionField},
-        PrimeCharacteristicRing,
-    };
-    type F = p3_koala_bear::KoalaBear;
-    type Ext = BinomialExtensionField<F, 4>;
-    // type Ext = F;
+//             let [eq_000, eq_001, eq_010, eq_011] = apply_basic_2::<F, Ext>(remainder, eq_0s, ws0);
+//             let [eq_100, eq_101, eq_110, eq_111] = apply_basic_2::<F, Ext>(remainder, eq_1s, ws1);
 
-    #[test]
-    fn bench_compress_eq() {
-        let mut rng = crate::test::rng(1);
+//             out.copy_from_slice(&[
+//                 eq_000, eq_001, eq_010, eq_011, eq_100, eq_101, eq_110, eq_111,
+//             ]);
+//         }
+//         _ => {
+//             let (low, high) = out.split_at_mut(out.len() / 2);
+//             let (first_row, remainder) = points.split_rows(1);
 
-        let n_iter = 1;
-        // crate::test::init_tracing();
+//             let (s0_buffer, next_workspace) = workspace.split_at_mut(num_points);
+//             let (s1_buffer, next_workspace) = next_workspace.split_at_mut(num_points);
 
-        fn bench_packed<F: Field, Ext: ExtensionField<F>>(
-            n_iter: usize,
-            k: usize,
-            points: &[Point<Ext>],
-            alpha: Ext,
-        ) -> Vec<Ext> {
-            let mut out = Ext::ExtensionPacking::zero_vec(1 << (k - 2));
-            eq_compress_split_packed_packed::<F, Ext>(&mut out, &points, alpha, (k - 2) / 2);
-            crate::test::bench("packed-only", n_iter, None, || {
-                let mut out = Ext::ExtensionPacking::zero_vec(1 << (k - 2));
-                eq_compress_split_packed_packed::<F, Ext>(&mut out, &points, alpha, (k - 2) / 2);
-            });
-            unpack_ext_packed(out)
-        }
+//             apply::<F, Ext>(scalars, first_row.values, s0_buffer, s1_buffer);
 
-        for k in [2, 3, 4, 5, 6, 7, 8, 12, 15, 18] {
-            println!("--- **** k: {}", k);
-            for n in [1, 10, 100] {
-                println!(" --- **** n: {}", n);
-                let points = (0..n)
-                    .map(|_| Point::<Ext>::rand(&mut rng, k))
-                    .collect::<Vec<_>>();
-
-                let alpha: Ext = Ext::ONE;
-
-                let mut out_ref = Ext::zero_vec(1 << k);
-                eq_compress_ref::<F, Ext>(&mut out_ref, &points, alpha);
-
-                // crate::test::bench("ref", n_iter, Some(&out_ref), || {
-                //     let mut out = Ext::zero_vec(1 << k);
-                //     eq_compress_ref::<F, Ext>(&mut out, &points, alpha);
-                //     out
-                // });
-
-                crate::test::bench("p3", n_iter, Some(&out_ref), || {
-                    let mut out = Ext::zero_vec(1 << k);
-                    eq_compress_p3::<F, Ext>(&mut out, &points, alpha);
-                    out
-                });
-
-                // crate::test::bench("rec7", n_iter, Some(&out_ref), || {
-
-                crate::test::bench("rec0", n_iter, Some(&out_ref), || {
-                    let mut out = Ext::zero_vec(1 << k);
-                    eq_compress_recursive_7::<F, Ext>(&mut out, &points, alpha);
-                    out
-                });
-
-                // crate::test::bench("rec7", n_iter, Some(&out_ref), || {
-                //     let mut out = Ext::zero_vec(1 << k);
-                //     eq_compress_recursive_7::<F, Ext>(&mut out, &points, alpha);
-                //     out
-                // });
-
-                // crate::test::bench("rec1", n_iter, Some(&out_ref), || {
-                //     let mut out = Ext::zero_vec(1 << k);
-                //     eq_compress_recursive_1::<F, Ext>(&mut out, &points, alpha);
-                //     out
-                // });
-
-                // crate::test::bench("splitpar", n_iter, Some(&out_ref), || {
-                //     let mut out = Ext::zero_vec(1 << k);
-                //     eq_compress_split::<F, Ext, true>(&mut out, &points, alpha, k / 2);
-                //     out
-                // });
-
-                // crate::test::bench("splitser", n_iter, Some(&out_ref), || {
-                //     let mut out = Ext::zero_vec(1 << k);
-                //     eq_compress_split::<F, Ext, false>(&mut out, &points, alpha, k / 2);
-                //     out
-                // });
-
-                // crate::test::bench("packed", n_iter, Some(&out_ref), || {
-                //     let mut out = Ext::zero_vec(1 << k);
-                //     eq_compress_split_packed::<F, Ext>(&mut out, &points, alpha, k / 2);
-                //     out
-                // });
-
-                // let out_packed = bench_packed::<F, Ext>(n_iter, k, &points, alpha);
-                // assert_eq!(out_ref, out_packed);
-
-                // let mut out_ref_packed = Ext::zero_vec(1 << (k - 2));
-                // eq_compress_split_packed_packed::<F, Ext>(
-                //     &mut out_ref_packed,
-                //     &points,
-                //     alpha,
-                //     k / 2,
-                // );
-            }
-        }
-    }
-}
+//             recursive_inner_1(remainder, s0_buffer, low, next_workspace);
+//             recursive_inner_1(remainder, s1_buffer, high, next_workspace);
+//         }
+//     }
+// }
