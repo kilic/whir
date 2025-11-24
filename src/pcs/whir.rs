@@ -192,7 +192,7 @@ impl<
                 .map(|_| {
                     let point: Ext = Challenge::draw(transcript);
                     let point = Point::expand(poly.k(), point);
-                    let eval = poly.eval::<Ext>(&point);
+                    let eval = poly.eval_base::<Ext>(&point);
                     transcript.write(eval)?;
                     Ok(EqClaim::new(point, eval))
                 })

@@ -379,6 +379,7 @@ pub(crate) mod pow {
         acc_packed
     }
 
+    #[tracing::instrument(skip_all, fields(vars = vars.len()))]
     pub(crate) fn compress_pows_packed<F: Field, Ext: ExtensionField<F>>(
         out: &mut [Ext::ExtensionPacking],
         vars: &[F],

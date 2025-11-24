@@ -1,5 +1,5 @@
 use crate::p3_field_prelude::*;
-use crate::utils::{n_rand, unsafe_allocate_zero_vec};
+use crate::utils::{n_rand, unpack, unsafe_allocate_zero_vec};
 use itertools::Itertools;
 use p3_matrix::{dense::DenseMatrix, util::reverse_matrix_index_bits};
 use p3_util::log2_strict_usize;
@@ -294,9 +294,9 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
             return constant.into();
         }
 
-        let (z0, z1) = point.split_at(point.len() / 2);
-        let left = z0.eq(Ext::ONE);
-        let right = z1.eq(Ext::ONE);
+        let (left, right) = point.split_at(point.len() / 2);
+        let left = left.eq(Ext::ONE);
+        let right = right.eq(Ext::ONE);
 
         assert_eq!(self.k(), left.k() + right.k());
         self.par_chunks(left.len())
@@ -309,6 +309,39 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
                     * c
             })
             .sum()
+    }
+
+    pub fn eval_base<Ext>(&self, point: &Point<Ext>) -> Ext
+    where
+        A: Field,
+        Ext: ExtensionField<A>,
+    {
+        let constant = (self.len() == 1).then_some(*self.first().unwrap());
+        if let Some(constant) = constant {
+            return constant.into();
+        }
+        let poly = A::Packing::pack_slice(self);
+
+        let (left, right) = point.split_at(point.len() / 2);
+        let left = left.eq_packed(Ext::ONE);
+        let right = right.eq(Ext::ONE);
+
+        assert_eq!(
+            self.k(),
+            left.k() + right.k() + log2_strict_usize(A::Packing::WIDTH)
+        );
+        let sum = poly
+            .par_chunks(left.len())
+            .zip_eq(right.par_iter())
+            .map(|(part, &c)| {
+                part.iter()
+                    .zip_eq(left.iter())
+                    .map(|(&a, &b)| b * a)
+                    .sum::<Ext::ExtensionPacking>()
+                    * c
+            })
+            .sum::<Ext::ExtensionPacking>();
+        unpack(&[sum]).into_iter().sum::<Ext>()
     }
 
     pub fn fix_var_mut<F: Clone + Copy + Default + Send + Sync>(&mut self, zi: F)
