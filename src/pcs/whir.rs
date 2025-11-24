@@ -223,7 +223,7 @@ impl<
                     commit_ext::<_, F, Ext, _, _>(
                         dft,
                         transcript,
-                        &sumcheck.poly,
+                        sumcheck.poly_unpacked(),
                         this_rate,
                         self.folding,
                         &self.mt_ext,
@@ -237,7 +237,7 @@ impl<
                         .map(|_| {
                             let point: Ext = Challenge::draw(transcript);
                             let point = Point::expand(sumcheck.k(), point);
-                            let eval = sumcheck.poly.eval(&point);
+                            let eval = sumcheck.eval(&point);
                             transcript.write(eval)?;
                             Ok(EqClaim::new(point, eval))
                         })
@@ -266,8 +266,10 @@ impl<
                         .iter()
                         .zip(vars.iter())
                         .map(|(local_poly, &var)| {
-                            let eval = Poly::new(local_poly.to_vec()).eval(&sumcheck.rs.reversed());
-                            debug_assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
+                            let eval =
+                                Poly::new(local_poly.to_vec()).eval(&sumcheck.rs().reversed());
+                            #[cfg(debug_assertions)]
+                            assert_eq!(eval, sumcheck.eval_univariate(Ext::from(var)));
                             PowClaim::new(var, eval, sumcheck.k())
                         })
                         .collect::<Vec<_>>()
@@ -286,7 +288,8 @@ impl<
                         .zip(vars.iter())
                         .map(|(local_poly, &var)| {
                             let eval = Poly::new(local_poly.to_vec()).eval(&round_point.reversed());
-                            debug_assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
+                            #[cfg(debug_assertions)]
+                            assert_eq!(eval, sumcheck.eval_univariate(Ext::from(var)));
                             PowClaim::new(var, eval, sumcheck.k())
                         })
                         .collect::<Vec<_>>()
@@ -302,7 +305,7 @@ impl<
 
         tracing::info_span!("final").in_scope(|| {
             // send final polynomial to the verifier
-            transcript.write_many(&sumcheck.poly)?;
+            transcript.write_many(sumcheck.poly_unpacked())?;
 
             // derive round params
             let (k_folded_domain, _, prev_rate) = self.round_params(n_rounds);
@@ -321,7 +324,7 @@ impl<
                         let var = F::two_adic_generator(k_folded_domain).exp_u64(index as u64);
                         let round_point = round_point.as_ref().unwrap().reversed();
                         let eval = Poly::new(_cw_local_poly.to_vec()).eval(&round_point);
-                        assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
+                        assert_eq!(eval, sumcheck.eval_univariate(Ext::from(var)));
                     }
                     Ok(())
                 })?;
@@ -332,9 +335,9 @@ impl<
                     #[cfg(debug_assertions)]
                     {
                         let var = F::two_adic_generator(k_folded_domain).exp_u64(index as u64);
-                        let round_point = sumcheck.rs.reversed();
+                        let round_point = sumcheck.rs().reversed();
                         let eval = Poly::new(_cw_local_poly.to_vec()).eval(&round_point);
-                        assert_eq!(eval, sumcheck.poly.eval_univariate(Ext::from(var)));
+                        assert_eq!(eval, sumcheck.eval_univariate(Ext::from(var)));
                     }
 
                     Ok(())

@@ -3,13 +3,13 @@ use crate::merkle::poseidon::{
 };
 use crate::merkle::{MerkleData, MerkleTree, MerkleTreeExt};
 use crate::transcript::{Reader, Writer};
-use crate::utils::log2_strict;
 use crate::Error;
 use p3_field::PackedValue;
 use p3_field::{ExtensionField, Field};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
+use p3_util::log2_strict_usize;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::cmp;
 use std::fmt::Debug;
@@ -59,7 +59,7 @@ impl<F: Field, Ext: ExtensionField<F>, const OUT: usize> MerkleData
     }
 
     fn k(&self) -> usize {
-        let k = log2_strict(self.data.height());
+        let k = log2_strict_usize(self.data.height());
         assert_eq!(self.layers_top.len() + self.layers_bottom.len(), k + 1);
         k
     }
@@ -101,7 +101,7 @@ where
         loop {
             let layer0 = layers_bottom.last().unwrap();
             let h = layer0.len() * F::Packing::WIDTH;
-            let k = log2_strict(h);
+            let k = log2_strict_usize(h);
             if k == TOP_LEVEL_TRESHOLD {
                 break;
             }

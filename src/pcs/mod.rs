@@ -240,18 +240,13 @@ mod test {
         }
     }
 
-    pub(crate) fn make_eq_claims_ext<
-        Transcript,
-        F: Field,
-        Ex0: ExtensionField<F>,
-        Ex1: ExtensionField<Ex0> + ExtensionField<F>,
-    >(
+    pub(crate) fn make_eq_claims_base<Transcript, F: Field, Ext: ExtensionField<F>>(
         transcript: &mut Transcript,
         n_points: usize,
-        poly: &Poly<Ex0>,
-    ) -> Result<Vec<EqClaim<Ex1, Ex1>>, crate::Error>
+        poly: &Poly<F>,
+    ) -> Result<Vec<EqClaim<Ext, Ext>>, crate::Error>
     where
-        Transcript: Challenge<F, Ex1> + Writer<Ex1>,
+        Transcript: Challenge<F, Ext> + Writer<Ext>,
     {
         (0..n_points)
             .map(|_| {
@@ -264,7 +259,26 @@ mod test {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    pub(crate) fn make_pow_claims_base<Transcript, F: Field, Ext: ExtensionField<F>>(
+    pub(crate) fn make_eq_claims<Transcript, F: Field, Ext: ExtensionField<F>>(
+        transcript: &mut Transcript,
+        n_points: usize,
+        poly: &Poly<Ext>,
+    ) -> Result<Vec<EqClaim<Ext, Ext>>, crate::Error>
+    where
+        Transcript: Challenge<F, Ext> + Writer<Ext>,
+    {
+        (0..n_points)
+            .map(|_| {
+                let point = Point::expand(poly.k(), transcript.draw());
+                let eval = poly.eval(&point);
+                let claim = EqClaim { point, eval };
+                transcript.write(claim.eval)?;
+                Ok(claim)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub(crate) fn make_pow_claims<Transcript, F: Field, Ext: ExtensionField<F>>(
         transcript: &mut Transcript,
         n_points: usize,
         poly: &Poly<Ext>,
@@ -288,7 +302,7 @@ mod test {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    pub(crate) fn get_eq_claims_ext<Transcript, F: Field, Ext: ExtensionField<F>>(
+    pub(crate) fn get_eq_claims<Transcript, F: Field, Ext: ExtensionField<F>>(
         transcript: &mut Transcript,
         k: usize,
         n: usize,
@@ -306,7 +320,7 @@ mod test {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    pub(crate) fn get_pow_claims_base<Transcript, F: Field, Ext: ExtensionField<F>>(
+    pub(crate) fn get_pow_claims<Transcript, F: Field, Ext: ExtensionField<F>>(
         transcript: &mut Transcript,
         k: usize,
         n: usize,
@@ -358,13 +372,13 @@ mod test {
         let dft = &tracing::info_span!("prepare dft")
             .in_scope(|| Radix2DFTSmallBatch::new(1 << (k - folding + rate)));
         let (proof, checkpoint_prover) = {
-            let poly: Poly<F> = Poly::rand(&mut rng, k);
+            let poly = Poly::<F>::rand(&mut rng, k);
 
             let mut transcript = Writer::init("test");
             let data = whir.commit(dft, &mut transcript, &poly).unwrap();
 
             let claims: Vec<EqClaim<Ext, Ext>> =
-                make_eq_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly).unwrap();
+                make_eq_claims_base::<_, F, Ext>(&mut transcript, n_points, &poly).unwrap();
             whir.open(dft, &mut transcript, claims, data, poly).unwrap();
 
             let checkpoint: F = transcript.draw();
@@ -374,7 +388,7 @@ mod test {
         let checkpoint_verifier = {
             let mut transcript = Reader::init(&proof, "test");
             let comm: [u8; 32] = transcript.read().unwrap();
-            let claims = get_eq_claims_ext::<_, F, Ext>(&mut transcript, whir.k, n_points).unwrap();
+            let claims = get_eq_claims::<_, F, Ext>(&mut transcript, whir.k, n_points).unwrap();
             whir.verify(&mut transcript, claims, comm).unwrap();
             let checkpoint: F = transcript.draw();
             checkpoint
@@ -459,14 +473,14 @@ mod test {
         let dft = &tracing::info_span!("prepare dft")
             .in_scope(|| Radix2DFTSmallBatch::new(1 << (k - folding + rate)));
         let (proof, checkpoint_prover) = {
-            let poly: Poly<F> = Poly::rand(&mut rng, k);
+            let poly = Poly::<F>::rand(&mut rng, k);
 
             let mut transcript = Writer::init(challenger);
             let data = tracing::info_span!("commit")
                 .in_scope(|| whir.commit(dft, &mut transcript, &poly).unwrap());
 
             let claims =
-                make_eq_claims_ext::<_, F, F, Ext>(&mut transcript, n_points, &poly).unwrap();
+                make_eq_claims_base::<_, F, Ext>(&mut transcript, n_points, &poly).unwrap();
 
             tracing::info_span!("open").in_scope(|| {
                 whir.open(dft, &mut transcript, claims, data, poly).unwrap();
@@ -480,7 +494,7 @@ mod test {
             let challenger = Challenger::new(perm16.clone());
             let mut transcript = Reader::init(&proof, challenger);
             let comm: Digest = transcript.read().unwrap();
-            let claims = get_eq_claims_ext::<_, F, Ext>(&mut transcript, whir.k, n_points).unwrap();
+            let claims = get_eq_claims::<_, F, Ext>(&mut transcript, whir.k, n_points).unwrap();
             whir.verify(&mut transcript, claims, comm).unwrap();
             transcript.draw()
         };
@@ -516,8 +530,9 @@ mod test {
     }
 
     #[test]
-    #[ignore]
+    // #[ignore]
     fn whir_bench() {
+        // run with : RUSTFLAGS='-C target-cpu=native'
         crate::test::init_tracing();
         run_whir_poseidon(25, 5, 1, 3, SecurityAssumption::CapacityBound, 90, 1);
     }

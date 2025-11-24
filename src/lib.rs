@@ -12,6 +12,15 @@ pub enum Error {
     IO,
 }
 
+pub(crate) mod p3_field_prelude {
+    #[allow(unused)]
+    pub(crate) use p3_field::{
+        dot_product, extension::BinomialExtensionField, extension::PackedBinomialExtensionField,
+        Algebra, BasedVectorSpace, ExtensionField, Field, PackedFieldExtension, PackedValue,
+        PrimeCharacteristicRing,
+    };
+}
+
 #[cfg(test)]
 pub mod test {
     use rand::{rngs::StdRng, SeedableRng};

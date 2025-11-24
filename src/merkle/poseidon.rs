@@ -1,11 +1,11 @@
 use crate::merkle::{MerkleData, MerkleTree, MerkleTreeExt};
 use crate::transcript::{Reader, Writer};
-use crate::utils::log2_strict;
 use crate::Error;
 use p3_field::{ExtensionField, Field};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
+use p3_util::log2_strict_usize;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::fmt::Debug;
 
@@ -93,7 +93,7 @@ where
 {
     let mut layers = vec![hash_base_reference_impl(&data, hasher)];
 
-    for _ in 0..log2_strict(data.height()) {
+    for _ in 0..log2_strict_usize(data.height()) {
         let layer = compress_reference_impl(layers.last().unwrap(), compress);
         layers.push(layer);
     }
@@ -125,7 +125,7 @@ where
 {
     let mut layers = vec![hash_ext_reference_impl(&data, hasher)];
 
-    for _ in 0..log2_strict(data.height()) {
+    for _ in 0..log2_strict_usize(data.height()) {
         let layer = compress_reference_impl(layers.last().unwrap(), compress);
         layers.push(layer);
     }
@@ -154,7 +154,7 @@ impl<F: Field, Ext: ExtensionField<F>, const OUT: usize> MerkleData
     }
 
     fn k(&self) -> usize {
-        let k = log2_strict(self.data.height());
+        let k = log2_strict_usize(self.data.height());
         assert_eq!(self.layers.len(), k + 1);
         k
     }
@@ -331,7 +331,7 @@ impl<
     {
         let mut layers = vec![hash_ext_reference_impl(&data, &self.hasher)];
 
-        for _ in 0..log2_strict(data.height()) {
+        for _ in 0..log2_strict_usize(data.height()) {
             let layer = compress_reference_impl(layers.last().unwrap(), &self.compress);
             layers.push(layer);
         }

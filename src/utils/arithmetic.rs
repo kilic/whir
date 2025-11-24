@@ -34,6 +34,11 @@ where
     }
 }
 
+pub(crate) fn extrapolate<F: Field, EF: ExtensionField<F>>(evals: &[F], target: EF) -> EF {
+    let points = (0..evals.len()).map(F::from_usize).collect::<Vec<_>>();
+    interpolate(&points, evals).iter().horner(target)
+}
+
 pub(crate) fn interpolate<F: Field, Ext: ExtensionField<F>>(
     points: &[F],
     evals: &[Ext],

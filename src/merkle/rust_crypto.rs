@@ -1,13 +1,13 @@
 use digest::Digest;
 use p3_field::{ExtensionField, Field};
 use p3_matrix::{dense::RowMajorMatrix, Matrix};
+use p3_util::log2_strict_usize;
 use rayon::{iter::ParallelIterator, slice::ParallelSlice};
 use std::fmt::Debug;
 
 use crate::{
     merkle::{MerkleData, MerkleTree, MerkleTreeExt},
     transcript::{Reader, Writer},
-    utils::log2_strict,
 };
 
 pub fn verify_merkle_proof<D: Digest>(
@@ -43,7 +43,7 @@ impl<F: Field> MerkleData for CommitmentData<F> {
     }
 
     fn k(&self) -> usize {
-        let k = log2_strict(self.data.height());
+        let k = log2_strict_usize(self.data.height());
         assert_eq!(self.layers.len(), k + 1);
         k
     }
@@ -75,7 +75,7 @@ impl<D: Digest> RustCryptoMerkleTree<D> {
             .collect::<Vec<_>>();
 
         let mut layers = vec![layer0];
-        for _ in 0..log2_strict(data.height()) {
+        for _ in 0..log2_strict_usize(data.height()) {
             let next_layer = layers
                 .last()
                 .unwrap()

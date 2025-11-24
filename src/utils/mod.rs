@@ -1,5 +1,8 @@
 pub mod arithmetic;
+use crate::p3_field_prelude::*;
 pub use arithmetic::*;
+use p3_util::log2_strict_usize;
+use rayon::prelude::*;
 
 pub fn n_rand<F>(rng: impl rand::RngCore, n: usize) -> Vec<F>
 where
@@ -9,17 +12,10 @@ where
     rng.random_iter().take(n).collect::<Vec<F>>()
 }
 
-#[inline(always)]
-pub fn log2_strict(n: usize) -> usize {
-    let res = n.trailing_zeros();
-    debug_assert_eq!(n.wrapping_shr(res), 1);
-    res as usize
-}
-
 pub trait TwoAdicSlice<T>: core::ops::Deref<Target = [T]> {
     #[inline(always)]
     fn k(&self) -> usize {
-        log2_strict(self.len())
+        log2_strict_usize(self.len())
     }
 }
 
@@ -52,6 +48,41 @@ pub(crate) fn unsafe_allocate_zero_vec<F: Default + Sized>(size: usize) -> Vec<F
         result = Vec::from_raw_parts(ptr, size, size);
     }
     result
+}
+
+#[inline]
+pub fn unpack_into<F: Field, Ext: ExtensionField<F>>(
+    out: &mut [Ext],
+    packed: &[Ext::ExtensionPacking],
+) {
+    let width = F::Packing::WIDTH;
+    assert_eq!(out.len(), packed.len() * width);
+    packed
+        .par_iter()
+        .zip(out.par_chunks_mut(width))
+        .with_min_len(1 << 14)
+        .for_each(|(packed, out_chunk)| {
+            let packed_coeffs = packed.as_basis_coefficients_slice();
+            for i in 0..width {
+                out_chunk[i] = Ext::from_basis_coefficients_fn(|j| packed_coeffs[j].as_slice()[i]);
+            }
+        });
+}
+
+#[inline]
+pub fn unpack<F: Field, Ext: ExtensionField<F>>(packed: &[Ext::ExtensionPacking]) -> Vec<Ext> {
+    let mut out = Ext::zero_vec(packed.len() * F::Packing::WIDTH);
+    unpack_into(&mut out, packed);
+    out
+}
+
+#[inline]
+pub fn pack<F: Field, Ext: ExtensionField<F>>(packed: &[Ext]) -> Vec<Ext::ExtensionPacking> {
+    packed
+        .par_chunks(F::Packing::WIDTH)
+        .with_min_len(1 << 14)
+        .map(|ext| Ext::ExtensionPacking::from_ext_slice(ext))
+        .collect()
 }
 
 #[cfg(test)]
