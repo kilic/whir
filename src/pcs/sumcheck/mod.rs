@@ -25,7 +25,7 @@ fn initial_round_packed<Transcript, F: Field, Ext: ExtensionField<F>>(
 where
     Transcript: Writer<Ext> + Challenge<F, Ext>,
 {
-    let poly = F::Packing::pack_slice(&poly);
+    let poly = F::Packing::pack_slice(poly);
     let mid = poly.len() / 2;
     let (plo, phi) = poly.split_at(mid);
     let (elo, ehi) = weights.split_at(mid);
@@ -231,15 +231,12 @@ impl<F: Field, Ext: ExtensionField<F>> MaybePacked<F, Ext> {
 
     fn transition(&mut self) {
         let k = self.k();
-        match self {
-            MaybePacked::Packed { poly, weights } => {
-                if k < PACK_THRESHOLD {
-                    let poly = unpack::<F, Ext>(&poly).into();
-                    let weights = unpack::<F, Ext>(&weights).into();
-                    *self = MaybePacked::Small { poly, weights };
-                }
+        if let MaybePacked::Packed { poly, weights } = self {
+            if k < PACK_THRESHOLD {
+                let poly = unpack::<F, Ext>(poly).into();
+                let weights = unpack::<F, Ext>(weights).into();
+                *self = MaybePacked::Small { poly, weights };
             }
-            _ => {}
         }
     }
 
@@ -277,10 +274,10 @@ impl<F: Field, Ext: ExtensionField<F>> MaybePacked<F, Ext> {
                     unpacked.len(),
                     1 << (poly.k() + log2_strict_usize(F::Packing::WIDTH))
                 );
-                unpack_into::<F, Ext>(unpacked, &poly);
+                unpack_into::<F, Ext>(unpacked, poly);
             }
             MaybePacked::Small { poly, .. } => {
-                unpacked.copy_from_slice(&poly);
+                unpacked.copy_from_slice(poly);
             }
         }
     }
@@ -699,7 +696,7 @@ mod test {
                             assert_eq!(round.weights(sc.poly_unpacked()), sc.sum);
                         }
 
-                        transcript.write_many(&sc.poly_unpacked()).unwrap();
+                        transcript.write_many(sc.poly_unpacked()).unwrap();
                         let checkpoint: F = transcript.draw();
                         let proof = transcript.finalize();
                         (proof, checkpoint)
@@ -830,7 +827,7 @@ mod test {
                         assert_eq!(round, k);
                         assert_eq!(k_folding, 0);
 
-                        transcript.write_many(&sc.poly_unpacked()).unwrap();
+                        transcript.write_many(sc.poly_unpacked()).unwrap();
                         let checkpoint: F = transcript.draw();
                         let proof = transcript.finalize();
                         (proof, checkpoint)

@@ -63,8 +63,8 @@ pub fn unpack_into<F: Field, Ext: ExtensionField<F>>(
         .with_min_len(1 << 14)
         .for_each(|(packed, out_chunk)| {
             let packed_coeffs = packed.as_basis_coefficients_slice();
-            for i in 0..width {
-                out_chunk[i] = Ext::from_basis_coefficients_fn(|j| packed_coeffs[j].as_slice()[i]);
+            for (i, out) in out_chunk.iter_mut().enumerate().take(width) {
+                *out = Ext::from_basis_coefficients_fn(|j| packed_coeffs[j].as_slice()[i]);
             }
         });
 }

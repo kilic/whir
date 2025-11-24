@@ -222,7 +222,7 @@ impl<F: Clone + Copy + Default + Send + Sync> Poly<F> {
     }
 
     pub fn constant(&self) -> Option<F> {
-        (self.len() == 1).then_some(self.first().unwrap().clone())
+        (self.len() == 1).then_some(*self.first().unwrap())
     }
 
     pub fn reverse_index_bits(self) -> Self {
@@ -329,7 +329,7 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         Ext: ExtensionField<A>,
     {
         let zi = Ext::ExtensionPacking::from_ext_slice(&vec![zi; A::Packing::WIDTH]);
-        let poly = A::Packing::pack_slice(&self);
+        let poly = A::Packing::pack_slice(self);
 
         let mid = poly.len() / 2;
         let (p0, p1) = poly.split_at(mid);
@@ -359,7 +359,7 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         F: Field,
         A: ExtensionField<F>,
     {
-        crate::utils::pack(&self).into()
+        crate::utils::pack(self).into()
     }
 
     pub fn unpack<F, Ext>(&self) -> Poly<Ext>
@@ -368,7 +368,7 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         Ext: ExtensionField<F, ExtensionPacking = A>,
         A: PackedFieldExtension<F, Ext>,
     {
-        crate::utils::unpack(&self).into()
+        crate::utils::unpack(self).into()
     }
 }
 
