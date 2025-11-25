@@ -86,43 +86,23 @@ pub(crate) mod eq {
 
     fn packed_flat_eqs<F: Field, Ext: ExtensionField<F>>(
         points: &[Point<Ext>],
-        alpha: Ext,
     ) -> Vec<Ext::ExtensionPacking> {
         assert!(!points.is_empty());
         let k = points[0].len();
         let k_pack = log2_strict_usize(F::Packing::WIDTH);
         let n = points.len();
 
-        let mut acc_init = Ext::zero_vec(n * (1 << k_pack));
-        acc_init[..n].copy_from_slice(&alpha.powers().take(n).collect());
-        for i in 0..k_pack {
-            let (lo, hi) = acc_init.split_at_mut((1 << i) * n);
-            let vars = points.iter().map(|c| c[i]).collect::<Vec<_>>();
-            lo.chunks_mut(n).zip(hi.chunks_mut(n)).for_each(|(lo, hi)| {
-                vars.iter()
-                    .zip(lo.iter_mut().zip(hi.iter_mut()))
-                    .for_each(|(&var, (lo, hi))| {
-                        *hi = *lo * var;
-                        *lo -= *hi;
-                    });
+        let mut packed = Ext::ExtensionPacking::zero_vec(n * (1 << (k - k_pack)));
+        packed
+            .iter_mut()
+            .zip(points.iter())
+            .for_each(|(packed, point)| {
+                *packed =
+                    Ext::ExtensionPacking::from_ext_slice(&point.range(0..k_pack).eq(Ext::ONE))
             });
-        }
-
-        let mut acc_init_transposed = Ext::zero_vec(acc_init.len());
-        transpose::transpose(
-            &acc_init,
-            &mut acc_init_transposed,
-            acc_init.len() / F::Packing::WIDTH,
-            F::Packing::WIDTH,
-        );
-        let mut acc_packed = Ext::ExtensionPacking::zero_vec(n * (1 << (k - k_pack)));
-        acc_init_transposed
-            .chunks(F::Packing::WIDTH)
-            .zip(acc_packed.iter_mut())
-            .for_each(|(chunk, packed)| *packed = Ext::ExtensionPacking::from_ext_slice(chunk));
 
         for i in 0..k - k_pack {
-            let (lo, hi) = acc_packed.split_at_mut((1 << i) * n);
+            let (lo, hi) = packed.split_at_mut((1 << i) * n);
             let vars = points.iter().map(|c| c[i + k_pack]).collect::<Vec<_>>();
             lo.chunks_mut(n).zip(hi.chunks_mut(n)).for_each(|(lo, hi)| {
                 vars.iter()
@@ -134,7 +114,7 @@ pub(crate) mod eq {
             });
         }
 
-        acc_packed
+        packed
     }
 
     #[tracing::instrument(skip_all, fields(n = points.len(), k = out.k() + log2_strict_usize(F::Packing::WIDTH)))]
@@ -161,8 +141,8 @@ pub(crate) mod eq {
             .iter()
             .map(|point| point.split_at(mid).1)
             .collect::<Vec<_>>();
-        let left = packed_flat_eqs::<F, Ext>(&left, alpha);
-        let right = flat_eqs(&right, Ext::ONE);
+        let left = packed_flat_eqs::<F, Ext>(&left);
+        let right = flat_eqs(&right, alpha);
 
         let n = points.len();
         out.par_chunks_mut(left.len() / n)
@@ -232,7 +212,7 @@ pub(crate) mod eq {
         type PackedExt = <Ext as ExtensionField<F>>::ExtensionPacking;
 
         #[tracing::instrument(skip_all, fields(points = points.len()))]
-        pub fn compress_eq_ref<F: Field, Ext: ExtensionField<F>>(
+        fn compress_eq_ref<F: Field, Ext: ExtensionField<F>>(
             out: &mut [Ext],
             points: &[Point<Ext>],
             alpha: Ext,
@@ -339,33 +319,16 @@ pub(crate) mod pow {
         let k_pack = log2_strict_usize(F::Packing::WIDTH);
         let n = points.len();
 
-        let mut acc_init: Vec<F> = F::zero_vec(n * (1 << k_pack));
-        acc_init[..n].copy_from_slice(&vec![F::ONE; n]);
-        for i in 0..k_pack {
-            let (lo, hi) = acc_init.split_at_mut((1 << i) * n);
-            let vars = points.iter().map(|c| c[i]).collect::<Vec<_>>();
-            lo.chunks_mut(n).zip(hi.chunks_mut(n)).for_each(|(lo, hi)| {
-                vars.iter()
-                    .zip(lo.iter_mut().zip(hi.iter_mut()))
-                    .for_each(|(&var, (lo, hi))| *hi = *lo * var);
+        let mut packed = F::Packing::zero_vec((1 << (k - k_pack)) * n);
+        points
+            .iter()
+            .zip(packed.iter_mut())
+            .for_each(|(point, packed)| {
+                *packed = *F::Packing::from_slice(&flat_pows(&[point.range(0..k_pack)]))
             });
-        }
-
-        let mut acc_init_transposed = F::zero_vec(acc_init.len());
-        transpose::transpose(
-            &acc_init,
-            &mut acc_init_transposed,
-            acc_init.len() / F::Packing::WIDTH,
-            F::Packing::WIDTH,
-        );
-        let mut acc_packed = F::Packing::zero_vec((1 << (k - k_pack)) * n);
-        acc_init_transposed
-            .chunks(F::Packing::WIDTH)
-            .zip(acc_packed.iter_mut())
-            .for_each(|(chunk, packed)| *packed = *F::Packing::from_slice(chunk));
 
         for i in 0..k - k_pack {
-            let (lo, hi) = acc_packed.split_at_mut((1 << i) * n);
+            let (lo, hi) = packed.split_at_mut((1 << i) * n);
             let vars = points.iter().map(|c| c[i + k_pack]).collect::<Vec<_>>();
             lo.chunks_mut(n).zip(hi.chunks_mut(n)).for_each(|(lo, hi)| {
                 vars.iter()
@@ -374,7 +337,7 @@ pub(crate) mod pow {
             });
         }
 
-        acc_packed
+        packed
     }
 
     #[tracing::instrument(skip_all, fields(vars = vars.len(), k = out.k() + log2_strict_usize(F::Packing::WIDTH)))]
@@ -483,7 +446,7 @@ pub(crate) mod pow {
         type PackedExt = <Ext as ExtensionField<F>>::ExtensionPacking;
 
         #[tracing::instrument(skip_all)]
-        pub fn compress_pow_ref<F: Field, Ext: ExtensionField<F>>(
+        fn compress_pow_ref<F: Field, Ext: ExtensionField<F>>(
             out: &mut [Ext],
             vars: &[F],
             alpha: Ext,

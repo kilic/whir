@@ -71,6 +71,10 @@ impl<F: Field> Point<F> {
         (left.to_vec().into(), right.to_vec().into())
     }
 
+    pub fn range(&self, range: std::ops::Range<usize>) -> Self {
+        self.0[range].to_vec().into()
+    }
+
     pub fn expand(k: usize, mut var: F) -> Self {
         (0..k)
             .map(|_| {
@@ -135,14 +139,10 @@ impl<F: Field> Point<F> {
         let k = self.len();
         let k_pack = log2_strict_usize(BaseField::Packing::WIDTH);
         assert!(k >= k_pack);
-
         assert_ne!(scale, F::ZERO);
-
-        let mut acc = F::ExtensionPacking::zero_vec(1 << (k - k_pack));
 
         let mut acc_init: Vec<F> = F::zero_vec(1 << k_pack);
         acc_init[0] = scale;
-
         for i in 0..k_pack {
             let (lo, hi) = acc_init.split_at_mut(1 << i);
             let var = self[i];
@@ -152,18 +152,8 @@ impl<F: Field> Point<F> {
             });
         }
 
-        let mut acc_init_transposed = F::zero_vec(acc_init.len());
-        transpose::transpose(
-            &acc_init,
-            &mut acc_init_transposed,
-            acc_init.len() / BaseField::Packing::WIDTH,
-            BaseField::Packing::WIDTH,
-        );
-
-        acc_init_transposed
-            .chunks(BaseField::Packing::WIDTH)
-            .zip(acc.iter_mut())
-            .for_each(|(chunk, packed)| *packed = F::ExtensionPacking::from_ext_slice(chunk));
+        let mut acc = F::ExtensionPacking::zero_vec(1 << (k - k_pack));
+        acc[0] = F::ExtensionPacking::from_ext_slice(&acc_init);
 
         for i in 0..k - k_pack {
             let (lo, hi) = acc.split_at_mut(1 << i);

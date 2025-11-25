@@ -530,7 +530,7 @@ mod test {
     }
 
     #[test]
-    // #[ignore]
+    #[ignore]
     fn whir_bench() {
         // run with : RUSTFLAGS='-C target-cpu=native'
         crate::test::init_tracing();
