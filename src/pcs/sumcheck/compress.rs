@@ -60,7 +60,6 @@ pub(crate) fn compress_claims<F: Field, Ext: ExtensionField<F>>(
 pub(crate) mod eq {
     use crate::p3_field_prelude::*;
     use crate::{poly::Point, utils::TwoAdicSlice};
-    use itertools::Itertools;
     use p3_util::log2_strict_usize;
     use rayon::prelude::*;
 
@@ -138,7 +137,7 @@ pub(crate) mod eq {
         acc_packed
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(n = points.len(), k = out.k() + log2_strict_usize(F::Packing::WIDTH)))]
     pub(crate) fn compress_eqs_packed<F: Field, Ext: ExtensionField<F>>(
         out: &mut [Ext::ExtensionPacking],
         points: &[Point<Ext>],
@@ -172,14 +171,14 @@ pub(crate) mod eq {
                 out.iter_mut().zip(left.chunks(n)).for_each(|(out, left)| {
                     *out += left
                         .iter()
-                        .zip_eq(right.iter())
+                        .zip(right.iter())
                         .map(|(&left, &right)| left * right)
                         .sum::<Ext::ExtensionPacking>();
                 });
             });
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, fields(n = points.len(), k = out.k()))]
     pub(crate) fn compress_eqs<F: Field, Ext: ExtensionField<F>>(
         out: &mut [Ext],
         points: &[Point<Ext>],
@@ -211,7 +210,7 @@ pub(crate) mod eq {
                 out.iter_mut().zip(left.chunks(n)).for_each(|(out, left)| {
                     *out += left
                         .iter()
-                        .zip_eq(right.iter())
+                        .zip(right.iter())
                         .map(|(&left, &right)| left * right)
                         .sum::<Ext>();
                 });
@@ -298,7 +297,6 @@ pub(crate) mod eq {
 pub(crate) mod pow {
     use crate::p3_field_prelude::*;
     use crate::{poly::Point, utils::TwoAdicSlice};
-    use itertools::Itertools;
     use p3_util::log2_strict_usize;
     use rayon::prelude::*;
 
@@ -379,7 +377,7 @@ pub(crate) mod pow {
         acc_packed
     }
 
-    #[tracing::instrument(skip_all, fields(vars = vars.len()))]
+    #[tracing::instrument(skip_all, fields(vars = vars.len(), k = out.k() + log2_strict_usize(F::Packing::WIDTH)))]
     pub(crate) fn compress_pows_packed<F: Field, Ext: ExtensionField<F>>(
         out: &mut [Ext::ExtensionPacking],
         vars: &[F],
@@ -421,7 +419,7 @@ pub(crate) mod pow {
                 out.iter_mut().zip(left.chunks(n)).for_each(|(out, left)| {
                     *out += left
                         .iter()
-                        .zip_eq(right.iter())
+                        .zip(right.iter())
                         .zip(alphas.iter())
                         .map(|((&left, &right), &alpha)| alpha * (left * right))
                         .sum::<Ext::ExtensionPacking>();
@@ -429,6 +427,7 @@ pub(crate) mod pow {
             });
     }
 
+    #[tracing::instrument(skip_all, fields(vars = vars.len(), k = out.k()))]
     pub(crate) fn compress_pows<F: Field, Ext: ExtensionField<F>>(
         out: &mut [Ext],
         vars: &[F],
@@ -462,7 +461,7 @@ pub(crate) mod pow {
                 out.iter_mut().zip(left.chunks(n)).for_each(|(out, left)| {
                     *out += left
                         .iter()
-                        .zip_eq(right.iter())
+                        .zip(right.iter())
                         .zip(alphas.iter())
                         .map(|((&left, &right), &alpha)| alpha * (left * right))
                         .sum::<Ext>();

@@ -23,33 +23,6 @@ impl<V> TwoAdicSlice<V> for Vec<V> {}
 impl<V> TwoAdicSlice<V> for &[V] {}
 impl<V> TwoAdicSlice<V> for &mut [V] {}
 
-// copy from a16z/jolt
-pub(crate) fn unsafe_allocate_zero_vec<F: Default + Sized>(size: usize) -> Vec<F> {
-    // https://stackoverflow.com/questions/59314686/how-to-efficiently-create-a-large-vector-of-items-initialized-to-the-same-value
-
-    // Check for safety of 0 allocation
-    unsafe {
-        let value = &F::default();
-        let ptr = value as *const F as *const u8;
-        let bytes = std::slice::from_raw_parts(ptr, std::mem::size_of::<F>());
-        assert!(bytes.iter().all(|&byte| byte == 0));
-    }
-
-    // Bulk allocate zeros, unsafely
-    let result: Vec<F>;
-    unsafe {
-        let layout = std::alloc::Layout::array::<F>(size).unwrap();
-        let ptr = std::alloc::alloc_zeroed(layout) as *mut F;
-
-        if ptr.is_null() {
-            panic!("Zero vec allocaiton failed");
-        }
-
-        result = Vec::from_raw_parts(ptr, size, size);
-    }
-    result
-}
-
 #[inline]
 pub fn unpack_into<F: Field, Ext: ExtensionField<F>>(
     out: &mut [Ext],

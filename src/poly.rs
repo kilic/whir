@@ -1,5 +1,5 @@
 use crate::p3_field_prelude::*;
-use crate::utils::{n_rand, unpack, unsafe_allocate_zero_vec};
+use crate::utils::{n_rand, unpack};
 use itertools::Itertools;
 use p3_matrix::{dense::DenseMatrix, util::reverse_matrix_index_bits};
 use p3_util::log2_strict_usize;
@@ -113,7 +113,7 @@ impl<F: Field> Point<F> {
         }
         assert_ne!(scale, F::ZERO);
         let k = self.len();
-        let mut eq = unsafe_allocate_zero_vec(1 << k);
+        let mut eq = F::zero_vec(1 << k);
         eq[0] = scale;
         for (i, &zi) in self.iter().enumerate() {
             let (lo, hi) = eq.split_at_mut(1 << i);
@@ -213,8 +213,11 @@ impl<F: Clone + Copy + Default + Send + Sync> Poly<F> {
         Self::new(n_rand(rng, 1 << k))
     }
 
-    pub fn zero(k: usize) -> Self {
-        Self(unsafe_allocate_zero_vec(1 << k))
+    pub fn zero(k: usize) -> Self
+    where
+        F: PrimeCharacteristicRing,
+    {
+        Self(F::zero_vec(1 << k))
     }
 
     pub fn k(&self) -> usize {
