@@ -1,6 +1,7 @@
 use crate::p3_field_prelude::*;
 use crate::utils::{n_rand, unpack};
 use itertools::Itertools;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::{dense::DenseMatrix, util::reverse_matrix_index_bits};
 use p3_util::log2_strict_usize;
 use rand::distr::{Distribution, StandardUniform};
@@ -62,6 +63,10 @@ impl<F: Field> Point<F> {
         Self(n_rand(rng, k))
     }
 
+    pub fn k(&self) -> usize {
+        self.len()
+    }
+
     pub fn vars(&self) -> &[F] {
         &self.0
     }
@@ -121,13 +126,10 @@ impl<F: Field> Point<F> {
         eq[0] = scale;
         for (i, &zi) in self.iter().enumerate() {
             let (lo, hi) = eq.split_at_mut(1 << i);
-            lo.par_iter_mut()
-                .zip(hi.par_iter_mut())
-                .with_min_len(1 << 14)
-                .for_each(|(a0, a1)| {
-                    *a1 = *a0 * zi;
-                    *a0 -= *a1;
-                });
+            lo.iter_mut().zip(hi.iter_mut()).for_each(|(a0, a1)| {
+                *a1 = *a0 * zi;
+                *a0 -= *a1;
+            });
         }
         eq.into()
     }
@@ -164,6 +166,19 @@ impl<F: Field> Point<F> {
             });
         }
         acc.into()
+    }
+
+    pub fn transpose(points: &[Self]) -> RowMajorMatrix<F> {
+        let k = points.iter().map(Point::k).all_equal_value().unwrap();
+        let n = points.len();
+        let mut flat_points = F::zero_vec(k * n);
+        points.iter().enumerate().for_each(|(i, point)| {
+            point
+                .iter()
+                .enumerate()
+                .for_each(|(j, &cur)| flat_points[j * n + i] = cur);
+        });
+        RowMajorMatrix::new(flat_points, n)
     }
 }
 
