@@ -1,13 +1,13 @@
+use crate::Error;
 use crate::merkle::poseidon::{
     commit_ext_reference_impl, commit_reference_impl, compress_reference_impl,
 };
 use crate::merkle::{MerkleData, MerkleTree, MerkleTreeExt};
 use crate::transcript::{Reader, Writer};
-use crate::Error;
 use p3_field::PackedValue;
 use p3_field::{ExtensionField, Field};
-use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
 use p3_util::log2_strict_usize;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
@@ -250,15 +250,11 @@ where
 }
 
 impl<
-        F: Field,
-        H: CryptographicHasher<F, [F; OUT]>
-            + CryptographicHasher<F::Packing, [F::Packing; OUT]>
-            + Sync,
-        C: PseudoCompressionFunction<[F; OUT], 2>
-            + PseudoCompressionFunction<[F::Packing; OUT], 2>
-            + Sync,
-        const OUT: usize,
-    > MerkleTree<F> for PackedPoseidonMerkleTree<F, H, C, OUT>
+    F: Field,
+    H: CryptographicHasher<F, [F; OUT]> + CryptographicHasher<F::Packing, [F::Packing; OUT]> + Sync,
+    C: PseudoCompressionFunction<[F; OUT], 2> + PseudoCompressionFunction<[F::Packing; OUT], 2> + Sync,
+    const OUT: usize,
+> MerkleTree<F> for PackedPoseidonMerkleTree<F, H, C, OUT>
 {
     type MerkleData = PoseidonCommitmentDataPacked<F, F, OUT>;
 
@@ -328,16 +324,12 @@ impl<
 }
 
 impl<
-        F: Field,
-        Ext: ExtensionField<F>,
-        H: CryptographicHasher<F, [F; OUT]>
-            + CryptographicHasher<F::Packing, [F::Packing; OUT]>
-            + Sync,
-        C: PseudoCompressionFunction<[F; OUT], 2>
-            + PseudoCompressionFunction<[F::Packing; OUT], 2>
-            + Sync,
-        const OUT: usize,
-    > MerkleTreeExt<F, Ext> for PackedPoseidonMerkleTree<F, H, C, OUT>
+    F: Field,
+    Ext: ExtensionField<F>,
+    H: CryptographicHasher<F, [F; OUT]> + CryptographicHasher<F::Packing, [F::Packing; OUT]> + Sync,
+    C: PseudoCompressionFunction<[F; OUT], 2> + PseudoCompressionFunction<[F::Packing; OUT], 2> + Sync,
+    const OUT: usize,
+> MerkleTreeExt<F, Ext> for PackedPoseidonMerkleTree<F, H, C, OUT>
 {
     type MerkleData = PoseidonCommitmentDataPacked<F, Ext, OUT>;
 

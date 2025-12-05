@@ -1,13 +1,13 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use p3_field::extension::BinomialExtensionField;
 use p3_koala_bear::Poseidon2KoalaBear;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use rand::rngs::StdRng;
 use rand::SeedableRng;
-use whir::merkle::poseidon_packed::PackedPoseidonMerkleTree;
+use rand::rngs::StdRng;
 use whir::merkle::MerkleTree;
 use whir::merkle::MerkleTreeExt;
+use whir::merkle::poseidon_packed::PackedPoseidonMerkleTree;
 use whir::transcript::test_transcript::TestWriter;
 use whir::utils::n_rand;
 

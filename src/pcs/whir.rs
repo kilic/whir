@@ -1,15 +1,15 @@
 use itertools::Itertools;
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::{ExtensionField, TwoAdicField};
-use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::Matrix;
+use p3_matrix::dense::RowMajorMatrixView;
 
 use crate::{
     merkle::{MerkleData, MerkleTree, MerkleTreeExt},
     pcs::{
-        params::{compute_number_of_rounds, SecurityAssumption},
-        sumcheck::{Sumcheck, SumcheckVerifier},
         EqClaim, PowClaim,
+        params::{SecurityAssumption, compute_number_of_rounds},
+        sumcheck::{Sumcheck, SumcheckVerifier},
     },
     poly::{Point, Poly},
     transcript::{Challenge, ChallengeBits, Reader, Writer},
@@ -97,11 +97,11 @@ pub struct Whir<
 }
 
 impl<
-        F: TwoAdicField,
-        Ext: ExtensionField<F> + TwoAdicField,
-        MT: MerkleTree<F>,
-        MTExt: MerkleTreeExt<F, Ext>,
-    > Whir<F, Ext, MT, MTExt>
+    F: TwoAdicField,
+    Ext: ExtensionField<F> + TwoAdicField,
+    MT: MerkleTree<F>,
+    MTExt: MerkleTreeExt<F, Ext>,
+> Whir<F, Ext, MT, MTExt>
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(

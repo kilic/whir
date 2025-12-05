@@ -31,8 +31,8 @@ fn test_serialization() {
     let n = 1000000;
 
     use rand::{
-        distr::{Distribution, StandardUniform},
         Rng,
+        distr::{Distribution, StandardUniform},
     };
 
     fn run_test<F: SerializedField>(rng: &mut impl Rng, n: usize)

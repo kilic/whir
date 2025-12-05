@@ -15,15 +15,15 @@ pub enum Error {
 pub(crate) mod p3_field_prelude {
     #[allow(unused)]
     pub(crate) use p3_field::{
-        dot_product, extension::BinomialExtensionField, extension::PackedBinomialExtensionField,
         Algebra, BasedVectorSpace, ExtensionField, Field, PackedFieldExtension, PackedValue,
-        PrimeCharacteristicRing,
+        PrimeCharacteristicRing, dot_product, extension::BinomialExtensionField,
+        extension::PackedBinomialExtensionField,
     };
 }
 
 #[cfg(test)]
 pub mod test {
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
 
     #[allow(dead_code)]
     pub(crate) fn rng(seed: u64) -> StdRng {
@@ -32,8 +32,8 @@ pub mod test {
 
     #[allow(dead_code)]
     pub(crate) fn init_tracing() {
-        use tracing_forest::util::LevelFilter;
         use tracing_forest::ForestLayer;
+        use tracing_forest::util::LevelFilter;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
         use tracing_subscriber::{EnvFilter, Registry};

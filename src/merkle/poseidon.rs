@@ -1,9 +1,9 @@
+use crate::Error;
 use crate::merkle::{MerkleData, MerkleTree, MerkleTreeExt};
 use crate::transcript::{Reader, Writer};
-use crate::Error;
 use p3_field::{ExtensionField, Field};
-use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_symmetric::{CryptographicHasher, PseudoCompressionFunction};
 use p3_util::log2_strict_usize;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
@@ -68,12 +68,10 @@ pub(super) fn compress_reference_impl<
     compress: &C,
 ) -> Vec<[F; OUT]> {
     let (lo, hi) = layer0.split_at(layer0.len() / 2);
-    let layer1 = lo
-        .par_iter()
+    lo.par_iter()
         .zip(hi.par_iter())
         .map(|(l, h)| compress.compress([*l, *h]))
-        .collect::<Vec<_>>();
-    layer1
+        .collect::<Vec<_>>()
 }
 
 pub(super) fn commit_reference_impl<
@@ -177,11 +175,11 @@ impl<F: Field, H, C, const OUT: usize> PoseidonMerkleTree<F, H, C, OUT> {
 }
 
 impl<
-        F: Field,
-        H: CryptographicHasher<F, [F; OUT]> + Sync,
-        C: PseudoCompressionFunction<[F; OUT], 2> + Sync,
-        const OUT: usize,
-    > PoseidonMerkleTree<F, H, C, OUT>
+    F: Field,
+    H: CryptographicHasher<F, [F; OUT]> + Sync,
+    C: PseudoCompressionFunction<[F; OUT], 2> + Sync,
+    const OUT: usize,
+> PoseidonMerkleTree<F, H, C, OUT>
 {
     fn query<Transcript, Ext: ExtensionField<F>>(
         &self,
@@ -264,11 +262,11 @@ impl<
 }
 
 impl<
-        F: Field,
-        H: CryptographicHasher<F, [F; OUT]> + Sync,
-        C: PseudoCompressionFunction<[F; OUT], 2> + Sync,
-        const OUT: usize,
-    > MerkleTree<F> for PoseidonMerkleTree<F, H, C, OUT>
+    F: Field,
+    H: CryptographicHasher<F, [F; OUT]> + Sync,
+    C: PseudoCompressionFunction<[F; OUT], 2> + Sync,
+    const OUT: usize,
+> MerkleTree<F> for PoseidonMerkleTree<F, H, C, OUT>
 {
     type MerkleData = PoseidonCommitmentData<F, F, OUT>;
 
@@ -312,12 +310,12 @@ impl<
 }
 
 impl<
-        F: Field,
-        Ext: ExtensionField<F>,
-        H: CryptographicHasher<F, [F; OUT]> + Sync,
-        C: PseudoCompressionFunction<[F; OUT], 2> + Sync,
-        const OUT: usize,
-    > MerkleTreeExt<F, Ext> for PoseidonMerkleTree<F, H, C, OUT>
+    F: Field,
+    Ext: ExtensionField<F>,
+    H: CryptographicHasher<F, [F; OUT]> + Sync,
+    C: PseudoCompressionFunction<[F; OUT], 2> + Sync,
+    const OUT: usize,
+> MerkleTreeExt<F, Ext> for PoseidonMerkleTree<F, H, C, OUT>
 {
     type MerkleData = PoseidonCommitmentData<F, Ext, OUT>;
 

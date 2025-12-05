@@ -61,8 +61,8 @@ pub(crate) mod eq {
     use crate::p3_field_prelude::*;
     use crate::{poly::Point, utils::TwoAdicSlice};
     use itertools::Itertools;
-    use p3_matrix::dense::RowMajorMatrixView;
     use p3_matrix::Matrix;
+    use p3_matrix::dense::RowMajorMatrixView;
     use p3_util::log2_strict_usize;
     use rayon::prelude::*;
 
@@ -144,8 +144,6 @@ pub(crate) mod eq {
         assert!(k_pack * 2 <= k);
 
         let n = points.len();
-        points.iter().for_each(|point| assert_eq!(point.len(), k));
-
         let points = Point::transpose(points);
         let (left, right) = points.split_rows(k / 2);
         let left = packed_flat_eqs::<F, Ext>(left);
@@ -199,9 +197,9 @@ pub(crate) mod eq {
     #[cfg(test)]
     mod test {
         use crate::poly::Point;
-        use crate::utils::{unpack, TwoAdicSlice};
-        use p3_field::{extension::BinomialExtensionField, PackedValue};
+        use crate::utils::{TwoAdicSlice, unpack};
         use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
+        use p3_field::{PackedValue, extension::BinomialExtensionField};
         use p3_util::log2_strict_usize;
         use rand::Rng;
         use rayon::prelude::*;
@@ -276,8 +274,8 @@ pub(crate) mod eq {
 pub(crate) mod pow {
     use crate::p3_field_prelude::*;
     use crate::utils::TwoAdicSlice;
-    use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixView};
     use p3_matrix::Matrix;
+    use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixView};
     use p3_util::log2_strict_usize;
     use rayon::prelude::*;
 
@@ -421,9 +419,9 @@ pub(crate) mod pow {
 
     #[cfg(test)]
     mod test {
-        use crate::utils::{unpack, TwoAdicSlice};
-        use p3_field::{extension::BinomialExtensionField, PackedValue};
+        use crate::utils::{TwoAdicSlice, unpack};
         use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
+        use p3_field::{PackedValue, extension::BinomialExtensionField};
         use p3_util::log2_strict_usize;
         use rand::Rng;
         use rayon::prelude::*;
@@ -480,7 +478,7 @@ mod test {
 
     use crate::pcs::test::{make_eq_claims, make_pow_claims};
     use crate::transcript::test_transcript::TestWriter;
-    use crate::utils::{unpack, VecOps};
+    use crate::utils::{VecOps, unpack};
     use crate::{
         pcs::sumcheck::{compress_claims, compress_claims_packed},
         poly::{Point, Poly},

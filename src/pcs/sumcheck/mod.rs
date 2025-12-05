@@ -1,12 +1,12 @@
 use crate::{
     p3_field_prelude::*,
     pcs::{
-        sumcheck::compress::{compress_claims, compress_claims_packed},
         EqClaim, PowClaim,
+        sumcheck::compress::{compress_claims, compress_claims_packed},
     },
-    poly::{eval_eq_xy, eval_pow_xy, Point, Poly},
+    poly::{Point, Poly, eval_eq_xy, eval_pow_xy},
     transcript::{Challenge, Reader, Writer},
-    utils::{extrapolate, unpack, unpack_into, VecOps},
+    utils::{VecOps, extrapolate, unpack, unpack_into},
 };
 use p3_util::log2_strict_usize;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
@@ -231,12 +231,13 @@ impl<F: Field, Ext: ExtensionField<F>> MaybePacked<F, Ext> {
 
     fn transition(&mut self) {
         let k = self.k();
-        if let MaybePacked::Packed { poly, weights } = self {
-            if k < PACK_THRESHOLD {
+        match self {
+            MaybePacked::Packed { poly, weights } if k < PACK_THRESHOLD => {
                 let poly = unpack::<F, Ext>(poly).into();
                 let weights = unpack::<F, Ext>(weights).into();
                 *self = MaybePacked::Small { poly, weights };
             }
+            _ => {}
         }
     }
 
@@ -574,12 +575,12 @@ mod test {
 
     use crate::pcs::test::{make_eq_claims, make_eq_claims_base, make_pow_claims};
     use crate::transcript::test_transcript::{TestReader, TestWriter};
-    use crate::utils::{unpack, VecOps};
+    use crate::utils::{VecOps, unpack};
     use crate::{
         pcs::{
-            sumcheck::{compress_claims, compress_claims_packed, MultiRound, Sumcheck},
-            test::{get_eq_claims, get_pow_claims},
             EqClaim, PowClaim,
+            sumcheck::{MultiRound, Sumcheck, compress_claims, compress_claims_packed},
+            test::{get_eq_claims, get_pow_claims},
         },
         poly::{Point, Poly},
         transcript::{Challenge, Writer},

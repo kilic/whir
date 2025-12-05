@@ -84,16 +84,16 @@ mod test {
 
     use crate::{
         merkle::{
-            poseidon::PoseidonMerkleTree, poseidon_packed::PackedPoseidonMerkleTree,
-            rust_crypto::RustCryptoMerkleTree, MerkleData, MerkleTree, MerkleTreeExt,
+            MerkleData, MerkleTree, MerkleTreeExt, poseidon::PoseidonMerkleTree,
+            poseidon_packed::PackedPoseidonMerkleTree, rust_crypto::RustCryptoMerkleTree,
         },
         transcript::{
-            test_transcript::{TestReader, TestWriter},
             ChallengeBits, Reader, Writer,
+            test_transcript::{TestReader, TestWriter},
         },
         utils::n_rand,
     };
-    use p3_field::{extension::BinomialExtensionField, ExtensionField, Field};
+    use p3_field::{ExtensionField, Field, extension::BinomialExtensionField};
     use p3_koala_bear::Poseidon2KoalaBear;
     use p3_matrix::dense::RowMajorMatrix;
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};

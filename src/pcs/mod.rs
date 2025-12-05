@@ -67,23 +67,23 @@ mod test {
     use crate::{
         field::SerializedField,
         merkle::{poseidon_packed::PackedPoseidonMerkleTree, rust_crypto::RustCryptoMerkleTree},
-        pcs::{params::SecurityAssumption, whir::Whir, EqClaim, PowClaim},
+        pcs::{EqClaim, PowClaim, params::SecurityAssumption, whir::Whir},
         poly::{Point, Poly},
         transcript::{
+            Challenge, Reader, Writer,
             poseidon::{PoseidonReader, PoseidonWriter},
             rust_crypto::{RustCryptoReader, RustCryptoWriter},
-            Challenge, Reader, Writer,
         },
     };
     use p3_challenger::DuplexChallenger;
     use p3_dft::{Radix2DFTSmallBatch, TwoAdicSubgroupDft};
-    use p3_field::{extension::BinomialExtensionField, ExtensionField, Field, TwoAdicField};
+    use p3_field::{ExtensionField, Field, TwoAdicField, extension::BinomialExtensionField};
     use p3_koala_bear::Poseidon2KoalaBear;
-    use p3_matrix::{dense::RowMajorMatrixView, Matrix};
+    use p3_matrix::{Matrix, dense::RowMajorMatrixView};
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
     use rand::{
-        distr::{Distribution, StandardUniform},
         Rng,
+        distr::{Distribution, StandardUniform},
     };
 
     #[test]

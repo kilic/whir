@@ -60,9 +60,9 @@ pub trait BytesReader {
 pub mod test_transcript {
     use crate::field::SerializedField;
     use rand::{
+        Rng, SeedableRng,
         distr::{Distribution, StandardUniform},
         rngs::StdRng,
-        Rng, SeedableRng,
     };
     use std::{
         io::{Read, Write},
@@ -252,10 +252,10 @@ mod test {
     #[cfg(test)]
     use crate::field::SerializedField;
     use crate::transcript::{
+        Challenge, ChallengeBits, Reader, Writer,
         poseidon::{PoseidonReader, PoseidonWriter},
         rust_crypto::{RustCryptoReader, RustCryptoWriter},
         test_transcript::{TestReader, TestWriter},
-        Challenge, ChallengeBits, Reader, Writer,
     };
     #[cfg(test)]
     use digest::{Digest, FixedOutputReset};
@@ -267,8 +267,8 @@ mod test {
     use p3_goldilocks::Goldilocks;
     use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
     use rand::{
-        distr::{Distribution, StandardUniform},
         Rng,
+        distr::{Distribution, StandardUniform},
     };
 
     fn writer<W, F: Field + SerializedField, Ext: ExtensionField<F> + SerializedField>(

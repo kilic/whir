@@ -1,6 +1,6 @@
 use digest::Digest;
 use p3_field::{ExtensionField, Field};
-use p3_matrix::{dense::RowMajorMatrix, Matrix};
+use p3_matrix::{Matrix, dense::RowMajorMatrix};
 use p3_util::log2_strict_usize;
 use rayon::{iter::ParallelIterator, slice::ParallelSlice};
 use std::fmt::Debug;
