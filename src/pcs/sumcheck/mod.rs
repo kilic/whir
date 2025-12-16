@@ -2,7 +2,7 @@ use crate::{
     p3_field_prelude::*,
     pcs::{
         EqClaim, PowClaim,
-        sumcheck::compress::{compress_claims, compress_claims_packed},
+        sumcheck::combine::{combine_claims, combine_claims_packed},
     },
     poly::{Point, Poly, eval_eq_xy, eval_pow_xy},
     transcript::{Challenge, Reader, Writer},
@@ -11,157 +11,69 @@ use crate::{
 use p3_util::log2_strict_usize;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 
-mod compress;
+mod combine;
 
-pub(crate) const PACK_THRESHOLD: usize = 4;
-
-#[tracing::instrument(skip_all, fields(k = poly.k()))]
-fn initial_round_packed<Transcript, F: Field, Ext: ExtensionField<F>>(
-    transcript: &mut Transcript,
-    sum: &mut Ext,
-    poly: &Poly<F>,
-    weights: &mut Poly<Ext::ExtensionPacking>,
-) -> Result<Ext, crate::Error>
+pub fn coeffs<A, B>(poly: &[A], weights: &[B]) -> (B, B)
 where
-    Transcript: Writer<Ext> + Challenge<F, Ext>,
+    A: Copy + Send + Sync + PrimeCharacteristicRing,
+    B: Copy + Send + Sync + Algebra<A>,
 {
-    let poly = F::Packing::pack_slice(poly);
     let mid = poly.len() / 2;
     let (plo, phi) = poly.split_at(mid);
     let (elo, ehi) = weights.split_at(mid);
-
-    let (v0, v2) = plo
-        .par_iter()
+    plo.par_iter()
         .zip_eq(phi.par_iter())
         .zip_eq(elo.par_iter().zip_eq(ehi.par_iter()))
         .map(|((&p0, &p1), (&e0, &e1))| (e0 * p0, (e1.double() - e0) * (p1.double() - p0)))
         .reduce(
-            || (Ext::ExtensionPacking::ZERO, Ext::ExtensionPacking::ZERO),
+            || (B::ZERO, B::ZERO),
             |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
-        );
-
-    let v0 = Ext::ExtensionPacking::to_ext_iter([v0]).sum::<Ext>();
-    let v2 = Ext::ExtensionPacking::to_ext_iter([v2]).sum::<Ext>();
-    transcript.write(v0)?;
-    transcript.write(v2)?;
-
-    let round_poly = vec![v0, *sum - v0, v2];
-    let r = Challenge::<F, Ext>::draw(transcript);
-    *sum = extrapolate(&round_poly, r);
-    weights.fix_var_mut(r);
-    Ok(r)
+        )
 }
 
 #[tracing::instrument(skip_all, fields(k = poly.k()))]
 fn initial_round<Transcript, F: Field, Ext: ExtensionField<F>>(
     transcript: &mut Transcript,
-    sum: &mut Ext,
     poly: &Poly<F>,
-    weights: &mut Poly<Ext>,
-) -> Result<Ext, crate::Error>
+    eq_claims: &[EqClaim<Ext, Ext>],
+    alpha: Ext,
+) -> Result<(ProdPoly<F, Ext>, Ext, Ext), crate::Error>
 where
     Transcript: Writer<Ext> + Challenge<F, Ext>,
 {
-    let mid = poly.len() / 2;
-    let (plo, phi) = poly.split_at(mid);
-    let (elo, ehi) = weights.split_at(mid);
+    let k = poly.k();
+    eq_claims.iter().for_each(|eq| assert_eq!(eq.k(), k));
 
-    let (v0, v2) = plo
-        .par_iter()
-        .zip_eq(phi.par_iter())
-        .zip_eq(elo.par_iter().zip_eq(ehi.par_iter()))
-        .map(|((&p0, &p1), (&e0, &e1))| (e0 * p0, (e1.double() - e0) * (p1.double() - p0)))
-        .reduce(
-            || (Ext::ZERO, Ext::ZERO),
-            |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
-        );
-
-    transcript.write(v0)?;
-    transcript.write(v2)?;
-
-    let round_poly = vec![v0, *sum - v0, v2];
-    let r = Challenge::<F, Ext>::draw(transcript);
-    *sum = extrapolate(&round_poly, r);
-    weights.fix_var_mut(r);
-    Ok(r)
-}
-
-#[tracing::instrument(skip_all, fields(k = poly.k() + log2_strict_usize(F::Packing::WIDTH)))]
-fn round_packed<Transcript, F: Field, Ext: ExtensionField<F>>(
-    transcript: &mut Transcript,
-    sum: &mut Ext,
-    poly: &mut Poly<Ext::ExtensionPacking>,
-    weights: &mut Poly<Ext::ExtensionPacking>,
-) -> Result<Ext, crate::Error>
-where
-    Transcript: Writer<Ext> + Challenge<F, Ext>,
-{
-    let mid = poly.len() / 2;
-    let (plo, phi) = poly.split_at(mid);
-    let (elo, ehi) = weights.split_at(mid);
-
-    let (v0, v2) = plo
-        .par_iter()
-        .zip_eq(phi.par_iter())
-        .zip_eq(elo.par_iter().zip_eq(ehi.par_iter()))
-        .map(|((&p0, &p1), (&e0, &e1))| (e0 * p0, (e1.double() - e0) * (p1.double() - p0)))
-        .reduce(
-            || (Ext::ExtensionPacking::ZERO, Ext::ExtensionPacking::ZERO),
-            |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
-        );
-
-    let v0 = Ext::ExtensionPacking::to_ext_iter([v0]).sum::<Ext>();
-    let v2 = Ext::ExtensionPacking::to_ext_iter([v2]).sum::<Ext>();
-    transcript.write(v0)?;
-    transcript.write(v2)?;
-
-    let round_poly = vec![v0, *sum - v0, v2];
-    let r = Challenge::<F, Ext>::draw(transcript);
-    *sum = extrapolate(&round_poly, r);
-
-    poly.fix_var_mut(r);
-    weights.fix_var_mut(r);
-    Ok(r)
-}
-
-#[tracing::instrument(skip_all, fields(k = poly.k()))]
-fn round<Transcript, F: Field, Ext: ExtensionField<F>>(
-    transcript: &mut Transcript,
-    sum: &mut Ext,
-    poly: &mut Poly<Ext>,
-    weights: &mut Poly<Ext>,
-) -> Result<Ext, crate::Error>
-where
-    Transcript: Writer<Ext> + Challenge<F, Ext>,
-{
-    let mid = poly.len() / 2;
-    let (plo, phi) = poly.split_at(mid);
-    let (elo, ehi) = weights.split_at(mid);
-
-    let (v0, v2) = plo
-        .par_iter()
-        .zip_eq(phi.par_iter())
-        .zip_eq(elo.par_iter().zip_eq(ehi.par_iter()))
-        .map(|((&p0, &p1), (&e0, &e1))| (e0 * p0, (e1.double() - e0) * (p1.double() - p0)))
-        .reduce(
-            || (Ext::ZERO, Ext::ZERO),
-            |(a0, a2), (b0, b2)| (a0 + b0, a2 + b2),
-        );
-
-    transcript.write(v0)?;
-    transcript.write(v2)?;
-
-    let round_poly = vec![v0, *sum - v0, v2];
-    let r = Challenge::<F, Ext>::draw(transcript);
-    *sum = extrapolate(&round_poly, r);
-
-    poly.fix_var_mut(r);
-    weights.fix_var_mut(r);
-    Ok(r)
+    let mut sum = Ext::ZERO;
+    let k_pack = log2_strict_usize(F::Packing::WIDTH);
+    let (prod_poly, r, c0, c2) = if k > k_pack {
+        let mut weights: Poly<_> = Ext::ExtensionPacking::zero_vec(1 << (k - k_pack)).into();
+        combine_claims_packed(&mut weights, &mut sum, alpha, eq_claims, &[]);
+        let (c0, c2) = coeffs(F::Packing::pack_slice(poly), &weights);
+        let c0 = Ext::ExtensionPacking::to_ext_iter([c0]).sum::<Ext>();
+        let c2 = Ext::ExtensionPacking::to_ext_iter([c2]).sum::<Ext>();
+        transcript.write_many(&[c0, c2])?;
+        let r: Ext = transcript.draw();
+        let poly = poly.fix_var_packed(r);
+        weights.fix_var_mut(r);
+        (ProdPoly::new_packed(poly, weights), r, c0, c2)
+    } else {
+        let mut weights: Poly<_> = Ext::zero_vec(1 << k).into();
+        combine_claims(&mut weights, &mut sum, alpha, eq_claims, &[]);
+        let (c0, c2) = coeffs(poly, &weights);
+        transcript.write_many(&[c0, c2])?;
+        let r: Ext = transcript.draw();
+        let poly = poly.fix_var(r);
+        weights.fix_var_mut(r);
+        (ProdPoly::new_small(poly, weights), r, c0, c2)
+    };
+    let sum = extrapolate(&[c0, sum - c0, c2], r);
+    debug_assert_eq!(prod_poly.prod(), sum);
+    Ok((prod_poly, r, sum))
 }
 
 #[derive(Debug, Clone)]
-enum MaybePacked<F: Field, Ext: ExtensionField<F>> {
+enum ProdPoly<F: Field, Ext: ExtensionField<F>> {
     Packed {
         poly: Poly<Ext::ExtensionPacking>,
         weights: Poly<Ext::ExtensionPacking>,
@@ -172,30 +84,28 @@ enum MaybePacked<F: Field, Ext: ExtensionField<F>> {
     },
 }
 
-impl<F: Field, Ext: ExtensionField<F>> MaybePacked<F, Ext> {
+impl<F: Field, Ext: ExtensionField<F>> ProdPoly<F, Ext> {
     fn new_packed(poly: Poly<Ext::ExtensionPacking>, weights: Poly<Ext::ExtensionPacking>) -> Self {
-        // TODO: assert sizes
-        Self::Packed { poly, weights }
+        let mut poly = Self::Packed { poly, weights };
+        poly.transition();
+        poly
     }
 
     fn new_small(poly: Poly<Ext>, weights: Poly<Ext>) -> Self {
-        // TODO: assert sizes
         Self::Small { poly, weights }
     }
 
     fn k(&self) -> usize {
         let k_pack = log2_strict_usize(F::Packing::WIDTH);
         match self {
-            MaybePacked::Packed { poly, weights } => {
+            Self::Packed { poly, weights } => {
                 let k = poly.k();
                 assert_eq!(k, weights.k());
-                // assert!(k >= PACK_THRESHOLD);
                 poly.k() + k_pack
             }
-            MaybePacked::Small { poly, weights } => {
+            Self::Small { poly, weights } => {
                 let k = poly.k();
                 assert_eq!(k, weights.k());
-                // assert!(k < PACK_THRESHOLD);
                 poly.k()
             }
         }
@@ -203,41 +113,20 @@ impl<F: Field, Ext: ExtensionField<F>> MaybePacked<F, Ext> {
 
     fn eval(&self, point: &Point<Ext>) -> Ext {
         match self {
-            MaybePacked::Packed { poly, .. } => poly.eval_packed(point),
-            MaybePacked::Small { poly, .. } => poly.eval(point),
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    fn eval_univariate(&self, var: Ext) -> Ext {
-        match self {
-            MaybePacked::Packed { poly, .. } => poly.eval_univariate_packed(var),
-            MaybePacked::Small { poly, .. } => poly.eval_univariate(var),
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    fn prod(&self) -> Ext {
-        match self {
-            MaybePacked::Packed { poly, weights } => {
-                let sum_packed = dot_product(poly.iter().cloned(), weights.iter().cloned());
-                Ext::ExtensionPacking::to_ext_iter([sum_packed]).sum::<Ext>()
-            }
-            MaybePacked::Small { poly, weights } => {
-                dot_product(poly.iter().cloned(), weights.iter().cloned())
-            }
+            Self::Packed { poly, .. } => poly.eval_packed(point),
+            Self::Small { poly, .. } => poly.eval(point),
         }
     }
 
     fn transition(&mut self) {
-        let k = self.k();
-        match self {
-            MaybePacked::Packed { poly, weights } if k < PACK_THRESHOLD => {
+        if let Self::Packed { poly, weights } = self {
+            let k = poly.k();
+            assert_eq!(k, weights.k());
+            if k == 0 {
                 let poly = unpack::<F, Ext>(poly).into();
                 let weights = unpack::<F, Ext>(weights).into();
-                *self = MaybePacked::Small { poly, weights };
+                *self = Self::Small { poly, weights };
             }
-            _ => {}
         }
     }
 
@@ -249,41 +138,59 @@ impl<F: Field, Ext: ExtensionField<F>> MaybePacked<F, Ext> {
     where
         Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
     {
-        let r = match self {
-            MaybePacked::Packed { poly, weights } => {
-                let r = round_packed::<_, F, Ext>(transcript, sum, poly, weights)?;
-                Ok(r)
+        let (c0, c2) = match self {
+            Self::Packed { poly, weights } => {
+                let (c0, c2) = coeffs(poly, weights);
+                let c0 = Ext::ExtensionPacking::to_ext_iter([c0]).sum::<Ext>();
+                let c2 = Ext::ExtensionPacking::to_ext_iter([c2]).sum::<Ext>();
+                (c0, c2)
             }
-            MaybePacked::Small { poly, weights } => {
-                let r = round::<_, F, Ext>(transcript, sum, poly, weights)?;
-                Ok(r)
-            }
-        }?;
+            Self::Small { poly, weights } => coeffs(poly, weights),
+        };
 
-        #[cfg(debug_assertions)]
-        assert_eq!(*sum, self.prod());
+        transcript.write(c0)?;
+        transcript.write(c2)?;
 
-        self.transition();
+        let round_poly = vec![c0, *sum - c0, c2];
+        let r = Challenge::<F, Ext>::draw(transcript);
+        self.compress(r);
+        *sum = extrapolate(&round_poly, r);
+        debug_assert_eq!(*sum, self.prod());
         Ok(r)
     }
 
     #[tracing::instrument(skip_all)]
     fn unpack_into(&self, unpacked: &mut [Ext]) {
         match self {
-            MaybePacked::Packed { poly, .. } => {
+            Self::Packed { poly, .. } => {
                 assert_eq!(
                     unpacked.len(),
                     1 << (poly.k() + log2_strict_usize(F::Packing::WIDTH))
                 );
                 unpack_into::<F, Ext>(unpacked, poly);
             }
-            MaybePacked::Small { poly, .. } => {
+            Self::Small { poly, .. } => {
                 unpacked.copy_from_slice(poly);
             }
         }
     }
 
-    fn compress_claims(
+    #[tracing::instrument(skip_all)]
+    fn compress(&mut self, r: Ext) {
+        match self {
+            Self::Packed { poly, weights } => {
+                poly.fix_var_mut(r);
+                weights.fix_var_mut(r);
+            }
+            Self::Small { poly, weights } => {
+                poly.fix_var_mut(r);
+                weights.fix_var_mut(r);
+            }
+        }
+        self.transition();
+    }
+
+    fn combine_claims(
         &mut self,
         sum: &mut Ext,
         alpha: Ext,
@@ -291,11 +198,31 @@ impl<F: Field, Ext: ExtensionField<F>> MaybePacked<F, Ext> {
         pow_claims: &[PowClaim<F, Ext>],
     ) {
         match self {
-            MaybePacked::Packed { weights, .. } => {
-                compress_claims_packed::<F, Ext>(weights, sum, alpha, eq_claims, pow_claims);
+            Self::Packed { weights, .. } => {
+                combine_claims_packed::<F, Ext>(weights, sum, alpha, eq_claims, pow_claims);
             }
-            MaybePacked::Small { weights, .. } => {
-                compress_claims::<F, Ext>(weights, sum, alpha, eq_claims, pow_claims);
+            Self::Small { weights, .. } => {
+                combine_claims::<F, Ext>(weights, sum, alpha, eq_claims, pow_claims);
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn eval_univariate(&self, var: Ext) -> Ext {
+        match self {
+            Self::Packed { poly, .. } => poly.eval_univariate_packed(var),
+            Self::Small { poly, .. } => poly.eval_univariate(var),
+        }
+    }
+
+    fn prod(&self) -> Ext {
+        match self {
+            Self::Packed { poly, weights } => {
+                let sum_packed = dot_product(poly.iter().cloned(), weights.iter().cloned());
+                Ext::ExtensionPacking::to_ext_iter([sum_packed]).sum::<Ext>()
+            }
+            Self::Small { poly, weights } => {
+                dot_product(poly.iter().cloned(), weights.iter().cloned())
             }
         }
     }
@@ -305,7 +232,7 @@ impl<F: Field, Ext: ExtensionField<F>> MaybePacked<F, Ext> {
 pub struct Sumcheck<F: Field, Ext: ExtensionField<F>> {
     sum: Ext,
     rs: Point<Ext>,
-    polys: MaybePacked<F, Ext>,
+    polys: ProdPoly<F, Ext>,
     poly_unpacked: Poly<Ext>,
     alpha: Ext,
 }
@@ -346,7 +273,6 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
     where
         Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
     {
-        let k_pack = log2_strict_usize(F::Packing::WIDTH);
         let k = poly.k();
         assert!(
             d > 0,
@@ -358,23 +284,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
         );
 
         let alpha = transcript.draw();
-        let mut sum = Ext::ZERO;
-
-        let (mut polys, r) = if k > PACK_THRESHOLD {
-            let mut weights: Poly<_> = Ext::ExtensionPacking::zero_vec(1 << (k - k_pack)).into();
-            compress_claims_packed(&mut weights, &mut sum, alpha, eq_claims, &[]);
-            let r = initial_round_packed(transcript, &mut sum, poly, &mut weights)?;
-            let poly = poly.fix_var_packed(r);
-            (MaybePacked::new_packed(poly, weights), r)
-        } else {
-            let mut weights: Poly<_> = Ext::zero_vec(1 << k).into();
-            compress_claims(&mut weights, &mut sum, alpha, eq_claims, &[]);
-            let r = initial_round(transcript, &mut sum, poly, &mut weights)?;
-            let poly = poly.fix_var(r);
-            (MaybePacked::new_small(poly, weights), r)
-        };
-        #[cfg(debug_assertions)]
-        assert_eq!(polys.prod(), sum);
+        let (mut polys, r, mut sum) = initial_round(transcript, poly, eq_claims, alpha)?;
 
         let rs = std::iter::once(Ok(r))
             .chain((1..d).map(|_| polys.round(transcript, &mut sum)))
@@ -407,7 +317,7 @@ impl<F: Field, Ext: ExtensionField<F>> Sumcheck<F, Ext> {
     {
         self.alpha = transcript.draw();
         self.polys
-            .compress_claims(&mut self.sum, self.alpha, eq_claims, pow_claims);
+            .combine_claims(&mut self.sum, self.alpha, eq_claims, pow_claims);
         let rs = (0..d)
             .map(|_| self.polys.round(transcript, &mut self.sum))
             .collect::<Result<Vec<_>, _>>()?;
@@ -448,7 +358,7 @@ impl<F: Field, Ext: ExtensionField<F>> MultiRound<F, Ext> {
         self.rs.extend(rs.iter());
     }
 
-    fn weights(&self, poly: &Poly<Ext>) -> Ext {
+    fn eval(&self, poly: &Poly<Ext>) -> Ext {
         let rs = &self.rs.reversed();
         let weights = self
             .eq_points
@@ -493,7 +403,6 @@ pub struct SumcheckVerifier<F: Field, Ext: ExtensionField<F>> {
     pub k: usize,
     sum: Ext,
     multi_rounds: Vec<MultiRound<F, Ext>>,
-    _marker: std::marker::PhantomData<F>,
 }
 
 impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
@@ -502,7 +411,6 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
             k,
             sum: Ext::ZERO,
             multi_rounds: Vec::new(),
-            _marker: std::marker::PhantomData,
         }
     }
 
@@ -558,14 +466,12 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckVerifier<F, Ext> {
         Transcript: Reader<Ext>,
     {
         let poly = poly.map_or_else(|| Ok(Poly::new(transcript.read_many(1 << self.k)?)), Ok)?;
-        let weigths = self
+        let sum = self
             .multi_rounds
             .iter()
-            .map(|round| round.weights(&poly))
+            .map(|round| round.eval(&poly))
             .sum::<Ext>();
-        (self.sum == weigths)
-            .then_some(())
-            .ok_or(crate::Error::Verify)
+        (self.sum == sum).then_some(()).ok_or(crate::Error::Verify)
     }
 }
 
@@ -575,100 +481,19 @@ mod test {
 
     use crate::pcs::test::{make_eq_claims, make_eq_claims_base, make_pow_claims};
     use crate::transcript::test_transcript::{TestReader, TestWriter};
-    use crate::utils::{VecOps, unpack};
     use crate::{
         pcs::{
             EqClaim, PowClaim,
-            sumcheck::{MultiRound, Sumcheck, compress_claims, compress_claims_packed},
+            sumcheck::{MultiRound, Sumcheck},
             test::{get_eq_claims, get_pow_claims},
         },
-        poly::{Point, Poly},
+        poly::Poly,
         transcript::{Challenge, Writer},
     };
-    use p3_util::log2_strict_usize;
     use rand::Rng;
 
     type F = p3_koala_bear::KoalaBear;
-    type PackedF = <F as Field>::Packing;
     type Ext = BinomialExtensionField<F, 4>;
-    type PackedExt = <Ext as ExtensionField<F>>::ExtensionPacking;
-
-    fn compress_naive<F: Field, Ext: ExtensionField<F>>(
-        k: usize,
-        alpha: Ext,
-        points: &[Point<Ext>],
-        vars: &[F],
-    ) -> Vec<Ext> {
-        let eqs = points
-            .iter()
-            .map(|point| point.eq(Ext::ONE))
-            .collect::<Vec<_>>();
-
-        let pows = vars
-            .iter()
-            .map(|&x| x.powers().take(1 << k).collect())
-            .collect::<Vec<_>>();
-
-        let mut acc = Ext::zero_vec(1 << k);
-        acc.iter_mut()
-            .enumerate()
-            .for_each(|(i, acc)| *acc += eqs.iter().map(|eq| &eq[i]).horner(alpha));
-
-        let shift = alpha.exp_u64(points.len() as u64);
-        acc.iter_mut().enumerate().for_each(|(i, acc)| {
-            *acc += pows.iter().map(|pow| &pow[i]).horner_shifted(alpha, shift)
-        });
-
-        acc
-    }
-
-    #[test]
-    fn test_compress_packed() {
-        let mut rng = crate::test::rng(1);
-        let alpha: Ext = rng.random();
-
-        let mut transcript = TestWriter::<Vec<u8>, F>::init();
-        let k_pack = log2_strict_usize(PackedF::WIDTH);
-        for k in 4..10 {
-            let poly = Poly::<Ext>::rand(&mut rng, k).pack::<F>();
-            for _ in 0..100 {
-                let n_eqs = rng.random_range(0..3);
-                let n_pows = rng.random_range(0..3);
-                let unpacked = poly.unpack::<F, Ext>();
-                let eq_claims =
-                    make_eq_claims::<_, F, Ext>(&mut transcript, n_eqs, &unpacked).unwrap();
-                let pow_claims =
-                    make_pow_claims::<_, F, Ext>(&mut transcript, n_pows, &unpacked).unwrap();
-
-                let points = eq_claims
-                    .iter()
-                    .map(|c| c.point().clone())
-                    .collect::<Vec<_>>();
-                let vars = pow_claims.iter().map(|c| c.var()).collect::<Vec<_>>();
-                let acc0 = compress_naive(k, alpha, &points, &vars);
-
-                {
-                    let mut acc1 = Ext::zero_vec(1 << k);
-                    let mut sum = Ext::ZERO;
-                    compress_claims::<F, Ext>(&mut acc1, &mut sum, alpha, &eq_claims, &pow_claims);
-                    assert_eq!(acc0, acc1);
-                }
-
-                {
-                    let mut acc1 = PackedExt::zero_vec(1 << (k - k_pack));
-                    let mut sum = Ext::ZERO;
-                    compress_claims_packed::<F, Ext>(
-                        &mut acc1,
-                        &mut sum,
-                        alpha,
-                        &eq_claims,
-                        &pow_claims,
-                    );
-                    assert_eq!(acc0, unpack::<F, Ext>(&acc1));
-                }
-            }
-        }
-    }
 
     #[test]
     fn test_sumcheck() {
@@ -694,7 +519,7 @@ mod test {
                                 sc.rs(),
                                 sc.alpha,
                             );
-                            assert_eq!(round.weights(sc.poly_unpacked()), sc.sum);
+                            assert_eq!(round.eval(sc.poly_unpacked()), sc.sum);
                         }
 
                         transcript.write_many(sc.poly_unpacked()).unwrap();
@@ -726,15 +551,12 @@ mod test {
                     let n_eqs = (0..n_fold)
                         .map(|_| rng.random_range(0..4))
                         .collect::<Vec<usize>>();
-
                     let n_pows = (0..n_fold)
                         .map(|i| if i == 0 { 0 } else { rng.random_range(0..4) })
                         .collect::<Vec<usize>>();
-
                     let ds = (0..n_fold)
                         .map(|_| rng.random_range(1..4))
                         .collect::<Vec<usize>>();
-
                     let k = ds.iter().sum::<usize>();
                     let poly = Poly::<F>::rand(&mut rng, k);
                     let (proof, checkpoint_prover) = {
@@ -768,7 +590,7 @@ mod test {
                                 sc.alpha,
                             );
 
-                            assert_eq!(round.weights(sc.poly_unpacked()), sc.sum);
+                            assert_eq!(round.eval(sc.poly_unpacked()), sc.sum);
                             (sc, vec![round])
                         };
 
@@ -804,13 +626,9 @@ mod test {
 
                                 {
                                     rounds.iter_mut().for_each(|round| round.extend(&rs));
-
-                                    let eq_points =
-                                        eq_claims.iter().map(EqClaim::point).collect::<Vec<_>>();
-
+                                    let eq_points = eq_claims.iter().map(EqClaim::point).collect();
                                     let pow_points =
-                                        pow_claims.iter().map(PowClaim::point).collect::<Vec<_>>();
-
+                                        pow_claims.iter().map(PowClaim::point).collect();
                                     rounds.push(super::MultiRound::<F, Ext>::new(
                                         eq_points, pow_points, rs, sc.alpha,
                                     ));
@@ -819,7 +637,7 @@ mod test {
                                 assert_eq!(
                                     rounds
                                         .iter()
-                                        .map(|round| round.weights(sc.poly_unpacked()))
+                                        .map(|round| round.eval(sc.poly_unpacked()))
                                         .sum::<Ext>(),
                                     sc.sum
                                 );
@@ -839,21 +657,12 @@ mod test {
                         let mut verifier = super::SumcheckVerifier::<F, Ext>::new(k);
 
                         n_eqs.iter().zip(n_pows.iter()).zip(ds.iter()).for_each(
-                            |((&n_eq_ext, &n_pow_base), &d)| {
-                                let eq_claims: Vec<EqClaim<Ext, Ext>> = get_eq_claims::<_, F, Ext>(
-                                    &mut transcript,
-                                    verifier.k,
-                                    n_eq_ext,
-                                )
-                                .unwrap();
+                            |((&n_eqs, &n_pows), &d)| {
+                                let eq_claims =
+                                    get_eq_claims(&mut transcript, verifier.k, n_eqs).unwrap();
 
-                                let pow_claims: Vec<PowClaim<F, Ext>> =
-                                    get_pow_claims::<_, F, Ext>(
-                                        &mut transcript,
-                                        verifier.k,
-                                        n_pow_base,
-                                    )
-                                    .unwrap();
+                                let pow_claims =
+                                    get_pow_claims(&mut transcript, verifier.k, n_pows).unwrap();
 
                                 verifier
                                     .fold(&mut transcript, d, &eq_claims, &pow_claims)

@@ -6,7 +6,7 @@ use crate::{
 use p3_util::log2_strict_usize;
 
 #[tracing::instrument(skip_all)]
-pub(crate) fn compress_claims_packed<F: Field, Ext: ExtensionField<F>>(
+pub(crate) fn combine_claims_packed<F: Field, Ext: ExtensionField<F>>(
     weights: &mut [Ext::ExtensionPacking],
     sum: &mut Ext,
     alpha: Ext,
@@ -27,12 +27,12 @@ pub(crate) fn compress_claims_packed<F: Field, Ext: ExtensionField<F>>(
     let points = eq_claims.iter().map(EqClaim::point).collect::<Vec<_>>();
     let vars = pow_claims.iter().map(PowClaim::var).collect::<Vec<_>>();
 
-    eq::compress_eqs_packed::<F, Ext>(weights, &points, alpha);
-    pow::compress_pows_packed::<F, Ext>(weights, &vars, alpha, points.len());
+    eq::combine_eqs_packed::<F, Ext>(weights, &points, alpha);
+    pow::combine_pows_packed::<F, Ext>(weights, &vars, alpha, points.len());
 }
 
 #[tracing::instrument(skip_all)]
-pub(crate) fn compress_claims<F: Field, Ext: ExtensionField<F>>(
+pub(crate) fn combine_claims<F: Field, Ext: ExtensionField<F>>(
     weights: &mut [Ext],
     sum: &mut Ext,
     alpha: Ext,
@@ -53,8 +53,8 @@ pub(crate) fn compress_claims<F: Field, Ext: ExtensionField<F>>(
     let points = eq_claims.iter().map(EqClaim::point).collect::<Vec<_>>();
     let vars = pow_claims.iter().map(PowClaim::var).collect::<Vec<_>>();
 
-    eq::compress_eqs::<F, Ext>(weights, &points, alpha);
-    pow::compress_pows::<F, Ext>(weights, &vars, alpha, points.len());
+    eq::combine_eqs::<F, Ext>(weights, &points, alpha);
+    pow::combine_pows::<F, Ext>(weights, &vars, alpha, points.len());
 }
 
 pub(crate) mod eq {
@@ -62,23 +62,20 @@ pub(crate) mod eq {
     use crate::{poly::Point, utils::TwoAdicSlice};
     use itertools::Itertools;
     use p3_matrix::Matrix;
-    use p3_matrix::dense::RowMajorMatrixView;
+    use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixView};
     use p3_util::log2_strict_usize;
     use rayon::prelude::*;
 
-    fn flat_eqs<F: Field, Ext: ExtensionField<F>>(
-        points: RowMajorMatrixView<Ext>,
-        alpha: Ext,
-    ) -> Vec<Ext> {
+    fn batch_eqs<F: Field>(points: RowMajorMatrixView<F>, alpha: F) -> RowMajorMatrix<F> {
         let k = points.height();
         let n = points.width();
         assert_ne!(n, 0);
 
-        let mut acc = Ext::zero_vec(n * (1 << k));
-        acc[..n].copy_from_slice(&alpha.powers().take(n).collect());
+        let mut mat = RowMajorMatrix::new(F::zero_vec(n * (1 << k)), n);
+        mat.row_mut(0).copy_from_slice(&alpha.powers().collect_n(n));
         points.row_slices().enumerate().for_each(|(i, vars)| {
-            let (lo, hi) = acc.split_at_mut((1 << i) * n);
-            lo.chunks_mut(n).zip(hi.chunks_mut(n)).for_each(|(lo, hi)| {
+            let (mut lo, mut hi) = mat.split_rows_mut(1 << i);
+            lo.rows_mut().zip(hi.rows_mut()).for_each(|(lo, hi)| {
                 vars.iter()
                     .zip(lo.iter_mut().zip(hi.iter_mut()))
                     .for_each(|(&var, (lo, hi))| {
@@ -87,35 +84,36 @@ pub(crate) mod eq {
                     });
             });
         });
-        acc
+        mat
     }
 
-    fn packed_flat_eqs<F: Field, Ext: ExtensionField<F>>(
+    fn packed_batch_eqs<F: Field, Ext: ExtensionField<F>>(
         points: RowMajorMatrixView<Ext>,
-    ) -> Vec<Ext::ExtensionPacking> {
+    ) -> RowMajorMatrix<Ext::ExtensionPacking> {
         let k = points.height();
         let n = points.width();
         assert_ne!(n, 0);
         let k_pack = log2_strict_usize(F::Packing::WIDTH);
 
         let (init_vars, rest_vars) = points.split_rows(k_pack);
-        let mut packed = Ext::ExtensionPacking::zero_vec(n * (1 << (k - k_pack)));
+        let mut mat =
+            RowMajorMatrix::new(Ext::ExtensionPacking::zero_vec(n * (1 << (k - k_pack))), n);
         if k_pack > 0 {
             init_vars
                 .transpose()
                 .row_slices()
-                .zip(packed.iter_mut())
+                .zip(mat.values.iter_mut())
                 .for_each(|(vars, packed)| {
                     let eq = Point::<Ext>::new(vars.to_vec()).eq(Ext::ONE);
                     *packed = Ext::ExtensionPacking::from_ext_slice(&eq);
                 });
         } else {
-            packed[..n].copy_from_slice(&vec![Ext::ExtensionPacking::ONE; n]);
+            mat.row_mut(0).fill(Ext::ExtensionPacking::ONE);
         }
 
-        for (i, vars) in rest_vars.row_slices().enumerate() {
-            let (lo, hi) = packed.split_at_mut((1 << i) * n);
-            lo.chunks_mut(n).zip(hi.chunks_mut(n)).for_each(|(lo, hi)| {
+        rest_vars.row_slices().enumerate().for_each(|(i, vars)| {
+            let (mut lo, mut hi) = mat.split_rows_mut(1 << i);
+            lo.rows_mut().zip(hi.rows_mut()).for_each(|(lo, hi)| {
                 vars.iter()
                     .zip(lo.iter_mut().zip(hi.iter_mut()))
                     .for_each(|(&var, (lo, hi))| {
@@ -123,13 +121,13 @@ pub(crate) mod eq {
                         *lo -= *hi;
                     });
             });
-        }
+        });
 
-        packed
+        mat
     }
 
     #[tracing::instrument(skip_all, fields(n = points.len(), k = out.k() + log2_strict_usize(F::Packing::WIDTH)))]
-    pub(crate) fn compress_eqs_packed<F: Field, Ext: ExtensionField<F>>(
+    pub(crate) fn combine_eqs_packed<F: Field, Ext: ExtensionField<F>>(
         out: &mut [Ext::ExtensionPacking],
         points: &[Point<Ext>],
         alpha: Ext,
@@ -141,29 +139,38 @@ pub(crate) mod eq {
         let k_pack = log2_strict_usize(F::Packing::WIDTH);
         let k = points.iter().map(Point::k).all_equal_value().unwrap();
         assert_eq!(out.k() + k_pack, k);
-        assert!(k_pack * 2 <= k);
+        assert!(k >= k_pack);
 
-        let n = points.len();
-        let points = Point::transpose(points);
-        let (left, right) = points.split_rows(k / 2);
-        let left = packed_flat_eqs::<F, Ext>(left);
-        let right = flat_eqs::<F, Ext>(right, alpha);
-
-        out.par_chunks_mut(left.len() / n)
-            .zip_eq(right.par_chunks(n))
-            .for_each(|(out, right)| {
-                out.iter_mut().zip(left.chunks(n)).for_each(|(out, left)| {
-                    *out += left
-                        .iter()
-                        .zip(right.iter())
-                        .map(|(&left, &right)| left * right)
-                        .sum::<Ext::ExtensionPacking>();
+        if k_pack * 2 > k {
+            points
+                .iter()
+                .zip(alpha.powers())
+                .for_each(|(point, alpha)| {
+                    let eq = point.eq(alpha);
+                    out.iter_mut()
+                        .zip_eq(eq.chunks(F::Packing::WIDTH))
+                        .for_each(|(out, chunk)| {
+                            *out += Ext::ExtensionPacking::from_ext_slice(chunk)
+                        });
                 });
-            });
+        } else {
+            let points = Point::transpose(points);
+            let (left, right) = points.split_rows(k / 2);
+            let left = packed_batch_eqs::<F, _>(left);
+            let right = batch_eqs(right, alpha);
+            out.par_chunks_mut(left.height())
+                .zip_eq(right.par_row_slices())
+                .for_each(|(out, right)| {
+                    out.iter_mut().zip(left.rows()).for_each(|(out, left)| {
+                        *out +=
+                            dot_product::<Ext::ExtensionPacking, _, _>(left, right.iter().copied());
+                    });
+                });
+        }
     }
 
     #[tracing::instrument(skip_all, fields(n = points.len(), k = out.k()))]
-    pub(crate) fn compress_eqs<F: Field, Ext: ExtensionField<F>>(
+    pub(crate) fn combine_eqs<F: Field, Ext: ExtensionField<F>>(
         out: &mut [Ext],
         points: &[Point<Ext>],
         alpha: Ext,
@@ -174,22 +181,17 @@ pub(crate) mod eq {
 
         let k = points.iter().map(Point::k).all_equal_value().unwrap();
         assert_eq!(out.k(), k);
-        let n = points.len();
 
         let points = Point::transpose(points);
         let (left, right) = points.split_rows(k / 2);
-        let left = flat_eqs::<F, Ext>(left, Ext::ONE);
-        let right = flat_eqs::<F, Ext>(right, alpha);
+        let left = batch_eqs(left, Ext::ONE);
+        let right = batch_eqs(right, alpha);
 
-        out.par_chunks_mut(left.len() / n)
-            .zip_eq(right.par_chunks(n))
+        out.par_chunks_mut(left.height())
+            .zip_eq(right.par_row_slices())
             .for_each(|(out, right)| {
-                out.iter_mut().zip(left.chunks(n)).for_each(|(out, left)| {
-                    *out += left
-                        .iter()
-                        .zip(right.iter())
-                        .map(|(&left, &right)| left * right)
-                        .sum::<Ext>();
+                out.iter_mut().zip(left.rows()).for_each(|(out, left)| {
+                    *out += dot_product::<Ext, _, _>(left, right.iter().copied());
                 });
             });
     }
@@ -209,7 +211,7 @@ pub(crate) mod eq {
         type PackedExt = <Ext as ExtensionField<F>>::ExtensionPacking;
 
         #[tracing::instrument(skip_all, fields(points = points.len()))]
-        fn compress_eq_ref<F: Field, Ext: ExtensionField<F>>(
+        fn combine_eq_ref<F: Field, Ext: ExtensionField<F>>(
             out: &mut [Ext],
             points: &[Point<Ext>],
             alpha: Ext,
@@ -230,7 +232,6 @@ pub(crate) mod eq {
 
                 lo.par_chunks_mut(n)
                     .zip(hi.par_chunks_mut(n))
-                    .with_min_len(1 << 14)
                     .for_each(|(lo, hi)| {
                         vars.iter().zip(lo.iter_mut().zip(hi.iter_mut())).for_each(
                             |(&z, (lo, hi))| {
@@ -242,28 +243,26 @@ pub(crate) mod eq {
             }
             acc.par_chunks(n)
                 .zip(out.par_iter_mut())
-                .with_min_len(1 << 14)
                 .for_each(|(row, out)| *out += row.iter().cloned().sum::<Ext>());
         }
 
         #[test]
-        fn test_compress_eqs() {
+        fn test_combine_eqs() {
             let mut rng = crate::test::rng(1);
             let alpha: Ext = rng.random();
             let k_pack = log2_strict_usize(<F as Field>::Packing::WIDTH);
-
-            for k in 4..10 {
-                for n in [1, 2, 10] {
+            for k in k_pack..10 {
+                for n in [1, 2, 10, 11] {
                     let points = (0..n)
                         .map(|_| Point::<Ext>::rand(&mut rng, k))
                         .collect::<Vec<_>>();
                     let mut out0 = Ext::zero_vec(1 << k);
-                    compress_eq_ref::<F, Ext>(&mut out0, &points, alpha);
+                    combine_eq_ref::<F, Ext>(&mut out0, &points, alpha);
                     let mut out1 = Ext::zero_vec(1 << k);
-                    super::compress_eqs::<F, Ext>(&mut out1, &points, alpha);
+                    super::combine_eqs::<F, Ext>(&mut out1, &points, alpha);
                     assert_eq!(out0, out1);
                     let mut out_packed = PackedExt::zero_vec(1 << (k - k_pack));
-                    super::compress_eqs_packed::<F, Ext>(&mut out_packed, &points, alpha);
+                    super::combine_eqs_packed::<F, Ext>(&mut out_packed, &points, alpha);
                     assert_eq!(out0, unpack::<F, Ext>(&out_packed));
                 }
             }
@@ -274,6 +273,7 @@ pub(crate) mod eq {
 pub(crate) mod pow {
     use crate::p3_field_prelude::*;
     use crate::utils::TwoAdicSlice;
+    use itertools::Itertools;
     use p3_matrix::Matrix;
     use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixView};
     use p3_util::log2_strict_usize;
@@ -293,56 +293,58 @@ pub(crate) mod pow {
         RowMajorMatrix::new(points, n)
     }
 
-    fn flat_pows<F: Field>(points: RowMajorMatrixView<F>) -> Vec<F> {
+    fn batch_pows<F: Field>(points: RowMajorMatrixView<F>) -> RowMajorMatrix<F> {
         let k = points.height();
         let n = points.width();
-        let mut acc = F::zero_vec(n * (1 << k));
-        acc[..n].copy_from_slice(&vec![F::ONE; n]);
+
+        let mut mat = RowMajorMatrix::new(F::zero_vec(n * (1 << k)), n);
+        mat.row_mut(0).fill(F::ONE);
+
         points.row_slices().enumerate().for_each(|(i, vars)| {
-            let (lo, hi) = acc.split_at_mut((1 << i) * n);
-            lo.chunks_mut(n).zip(hi.chunks_mut(n)).for_each(|(lo, hi)| {
+            let (lo, mut hi) = mat.split_rows_mut(1 << i);
+            lo.rows().zip(hi.rows_mut()).for_each(|(lo, hi)| {
                 vars.iter()
-                    .zip(lo.iter_mut().zip(hi.iter_mut()))
-                    .for_each(|(&var, (lo, hi))| *hi = *lo * var);
+                    .zip(lo.zip(hi.iter_mut()))
+                    .for_each(|(&var, (lo, hi))| *hi = lo * var);
             });
         });
-        acc
+        mat
     }
 
-    fn packed_flat_pows<F: Field>(points: RowMajorMatrixView<F>) -> Vec<F::Packing> {
-        let k_pack = log2_strict_usize(F::Packing::WIDTH);
+    fn packed_batch_pows<F: Field>(points: RowMajorMatrixView<F>) -> RowMajorMatrix<F::Packing> {
         let k = points.height();
         let n = points.width();
+        assert_ne!(n, 0);
+        let k_pack = log2_strict_usize(F::Packing::WIDTH);
 
         let (init_vars, rest_vars) = points.split_rows(k_pack);
-        let mut packed = F::Packing::zero_vec(n * (1 << (k - k_pack)));
+        let mut mat = RowMajorMatrix::new(F::Packing::zero_vec(n * (1 << (k - k_pack))), n);
         if k_pack > 0 {
             init_vars
                 .transpose()
                 .row_slices()
-                .zip(packed.iter_mut())
+                .zip(mat.values.iter_mut())
                 .for_each(|(vars, packed)| {
                     let point = RowMajorMatrixView::new(vars, 1);
-                    *packed = *F::Packing::from_slice(&flat_pows(point))
+                    *packed = *F::Packing::from_slice(&batch_pows(point).values)
                 });
         } else {
-            packed[..n].copy_from_slice(&vec![F::Packing::ONE; n]);
+            mat.row_mut(0).fill(F::Packing::ONE);
         }
 
         for (i, vars) in rest_vars.row_slices().enumerate() {
-            let (lo, hi) = packed.split_at_mut((1 << i) * n);
-            lo.chunks_mut(n).zip(hi.chunks_mut(n)).for_each(|(lo, hi)| {
+            let (lo, mut hi) = mat.split_rows_mut(1 << i);
+            lo.rows().zip(hi.rows_mut()).for_each(|(lo, hi)| {
                 vars.iter()
-                    .zip(lo.iter_mut().zip(hi.iter_mut()))
-                    .for_each(|(&var, (lo, hi))| *hi = *lo * var);
+                    .zip(lo.zip(hi.iter_mut()))
+                    .for_each(|(&var, (lo, hi))| *hi = lo * var);
             });
         }
-
-        packed
+        mat
     }
 
     #[tracing::instrument(skip_all, fields(vars = vars.len(), k = out.k() + log2_strict_usize(F::Packing::WIDTH)))]
-    pub(crate) fn compress_pows_packed<F: Field, Ext: ExtensionField<F>>(
+    pub(crate) fn combine_pows_packed<F: Field, Ext: ExtensionField<F>>(
         out: &mut [Ext::ExtensionPacking],
         vars: &[F],
         alpha: Ext,
@@ -352,39 +354,50 @@ pub(crate) mod pow {
             return;
         }
 
-        let n = vars.len();
         let k_pack = log2_strict_usize(F::Packing::WIDTH);
         let k = out.k() + k_pack;
-        assert!(k_pack * 2 <= k);
+        let n = vars.len();
 
-        let points = binary_powers(vars, k);
-        let (left, right) = points.split_rows(k / 2);
-        let left = packed_flat_pows(left);
-        let right = flat_pows(right);
-
-        let alphas = alpha
-            .powers()
-            .skip(shift)
-            .take(n)
-            .map(|alpha| Ext::ExtensionPacking::from_ext_slice(&vec![alpha; F::Packing::WIDTH]))
-            .collect::<Vec<_>>();
-
-        out.par_chunks_mut(left.len() / n)
-            .zip_eq(right.par_chunks(n))
-            .for_each(|(out, right)| {
-                out.iter_mut().zip(left.chunks(n)).for_each(|(out, left)| {
-                    *out += left
-                        .iter()
-                        .zip(right.iter())
-                        .zip(alphas.iter())
-                        .map(|((&left, &right), &alpha)| alpha * (left * right))
-                        .sum::<Ext::ExtensionPacking>();
+        if k_pack * 2 > k {
+            vars.iter()
+                .zip(alpha.powers().skip(shift))
+                .for_each(|(&var, challenge)| {
+                    let pow = Ext::from(var).shifted_powers(challenge).collect_n(1 << k);
+                    out.iter_mut()
+                        .zip_eq(pow.chunks(F::Packing::WIDTH))
+                        .for_each(|(out, chunk)| {
+                            *out += Ext::ExtensionPacking::from_ext_slice(chunk)
+                        });
                 });
-            });
+        } else {
+            let points = binary_powers(vars, k);
+            let (left, right) = points.split_rows(k / 2);
+            let left = packed_batch_pows(left);
+            let right = batch_pows(right);
+
+            let alphas = alpha
+                .powers()
+                .skip(shift)
+                .take(n)
+                .map(Ext::ExtensionPacking::from)
+                .collect::<Vec<_>>();
+
+            out.par_chunks_mut(left.height())
+                .zip(right.par_row_slices())
+                .for_each(|(out, right)| {
+                    out.iter_mut().zip(left.rows()).for_each(|(out, left)| {
+                        *out += left
+                            .zip(right.iter())
+                            .zip(alphas.iter())
+                            .map(|((left, &right), &alpha)| alpha * (left * right))
+                            .sum::<Ext::ExtensionPacking>();
+                    });
+                });
+        }
     }
 
     #[tracing::instrument(skip_all, fields(vars = vars.len(), k = out.k()))]
-    pub(crate) fn compress_pows<F: Field, Ext: ExtensionField<F>>(
+    pub(crate) fn combine_pows<F: Field, Ext: ExtensionField<F>>(
         out: &mut [Ext],
         vars: &[F],
         alpha: Ext,
@@ -399,19 +412,18 @@ pub(crate) mod pow {
 
         let points = binary_powers(vars, k);
         let (left, right) = points.split_rows(k / 2);
-        let left = flat_pows(left);
-        let right = flat_pows(right);
+        let left = batch_pows(left);
+        let right = batch_pows(right);
 
         let alphas = alpha.powers().skip(shift).take(n).collect::<Vec<_>>();
-        out.par_chunks_mut(left.len() / n)
-            .zip_eq(right.par_chunks(n))
+        out.par_chunks_mut(left.height())
+            .zip_eq(right.par_row_slices())
             .for_each(|(out, right)| {
-                out.iter_mut().zip(left.chunks(n)).for_each(|(out, left)| {
+                out.iter_mut().zip(left.rows()).for_each(|(out, left)| {
                     *out += left
-                        .iter()
                         .zip(right.iter())
                         .zip(alphas.iter())
-                        .map(|((&left, &right), &alpha)| alpha * (left * right))
+                        .map(|((left, &right), &alpha)| alpha * (left * right))
                         .sum::<Ext>();
                 });
             });
@@ -431,7 +443,7 @@ pub(crate) mod pow {
         type PackedExt = <Ext as ExtensionField<F>>::ExtensionPacking;
 
         #[tracing::instrument(skip_all)]
-        fn compress_pow_ref<F: Field, Ext: ExtensionField<F>>(
+        fn combine_pow_ref<F: Field, Ext: ExtensionField<F>>(
             out: &mut [Ext],
             vars: &[F],
             alpha: Ext,
@@ -449,22 +461,22 @@ pub(crate) mod pow {
         }
 
         #[test]
-        fn test_compress_pows() {
+        fn test_combine_pows() {
             let mut rng = crate::test::rng(1);
             let alpha: Ext = rng.random();
             let k_pack = log2_strict_usize(<F as Field>::Packing::WIDTH);
 
             let shift = 11;
-            for k in 4..10 {
-                for n in [1, 2, 10] {
+            for k in k_pack..10 {
+                for n in [1, 2, 10, 11] {
                     let vars: Vec<F> = (0..n).map(|_| rng.random()).collect::<Vec<_>>();
                     let mut out0 = Ext::zero_vec(1 << k);
-                    compress_pow_ref::<F, Ext>(&mut out0, &vars, alpha, shift);
+                    combine_pow_ref::<F, Ext>(&mut out0, &vars, alpha, shift);
                     let mut out1 = Ext::zero_vec(1 << k);
-                    super::compress_pows(&mut out1, &vars, alpha, shift);
+                    super::combine_pows(&mut out1, &vars, alpha, shift);
                     assert_eq!(out0, out1);
                     let mut out_packed = PackedExt::zero_vec(1 << (k - k_pack));
-                    super::compress_pows_packed(&mut out_packed, &vars, alpha, shift);
+                    super::combine_pows_packed(&mut out_packed, &vars, alpha, shift);
                     assert_eq!(out0, unpack::<F, Ext>(&out_packed));
                 }
             }
@@ -480,7 +492,7 @@ mod test {
     use crate::transcript::test_transcript::TestWriter;
     use crate::utils::{VecOps, unpack};
     use crate::{
-        pcs::sumcheck::{compress_claims, compress_claims_packed},
+        pcs::sumcheck::{combine_claims, combine_claims_packed},
         poly::{Point, Poly},
     };
     use p3_util::log2_strict_usize;
@@ -493,7 +505,7 @@ mod test {
     type PackedF = <F as Field>::Packing;
     type PackedExt = <Ext as ExtensionField<F>>::ExtensionPacking;
 
-    fn compress_naive<F: Field, Ext: ExtensionField<F>>(
+    fn combine_naive<F: Field, Ext: ExtensionField<F>>(
         k: usize,
         alpha: Ext,
         points: &[Point<Ext>],
@@ -523,13 +535,13 @@ mod test {
     }
 
     #[test]
-    fn test_compress_packed() {
+    fn test_combine_packed() {
         let mut rng = crate::test::rng(1);
         let alpha: Ext = rng.random();
 
         let mut transcript = TestWriter::<Vec<u8>, F>::init();
         let k_pack = log2_strict_usize(PackedF::WIDTH);
-        for k in 4..10 {
+        for k in k_pack..10 {
             let poly = Poly::<Ext>::rand(&mut rng, k).pack::<F>();
             for _ in 0..100 {
                 let n_eqs = rng.random_range(0..3);
@@ -545,19 +557,19 @@ mod test {
                     .map(|c| c.point().clone())
                     .collect::<Vec<_>>();
                 let vars = pow_claims.iter().map(|c| c.var()).collect::<Vec<_>>();
-                let acc0 = compress_naive(k, alpha, &points, &vars);
+                let acc0 = combine_naive(k, alpha, &points, &vars);
 
                 {
                     let mut acc1 = Ext::zero_vec(1 << k);
                     let mut sum = Ext::ZERO;
-                    compress_claims::<F, Ext>(&mut acc1, &mut sum, alpha, &eq_claims, &pow_claims);
+                    combine_claims::<F, Ext>(&mut acc1, &mut sum, alpha, &eq_claims, &pow_claims);
                     assert_eq!(acc0, acc1);
                 }
 
                 {
                     let mut acc1 = PackedExt::zero_vec(1 << (k - k_pack));
                     let mut sum = Ext::ZERO;
-                    compress_claims_packed::<F, Ext>(
+                    combine_claims_packed::<F, Ext>(
                         &mut acc1,
                         &mut sum,
                         alpha,

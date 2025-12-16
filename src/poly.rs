@@ -1,7 +1,10 @@
+use std::ops::RangeBounds;
+use std::slice::SliceIndex;
+
 use crate::p3_field_prelude::*;
 use crate::utils::{n_rand, unpack};
 use itertools::Itertools;
-use p3_matrix::dense::RowMajorMatrix;
+use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixView};
 use p3_matrix::{dense::DenseMatrix, util::reverse_matrix_index_bits};
 use p3_util::log2_strict_usize;
 use rand::distr::{Distribution, StandardUniform};
@@ -16,7 +19,7 @@ use rayon::{
 pub(crate) fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Point<Ext>) -> Ext {
     assert_eq!(x.len(), y.len());
     x.par_iter()
-        .zip(y.par_iter())
+        .zip_eq(y.par_iter())
         .map(|(&xi, &yi)| (yi * xi).double() - xi - yi + F::ONE)
         .product()
 }
@@ -24,7 +27,7 @@ pub(crate) fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Poi
 pub(crate) fn eval_pow_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Point<Ext>) -> Ext {
     assert_eq!(x.len(), y.len());
     x.par_iter()
-        .zip(y.par_iter())
+        .zip_eq(y.par_iter())
         .map(|(&xi, &yi)| (yi * xi) - yi + F::ONE)
         .product()
 }
@@ -76,7 +79,7 @@ impl<F: Field> Point<F> {
         (left.to_vec().into(), right.to_vec().into())
     }
 
-    pub fn range(&self, range: std::ops::Range<usize>) -> Self {
+    pub fn range<R: RangeBounds<usize> + SliceIndex<[F], Output = [F]>>(&self, range: R) -> Self {
         self.0[range].to_vec().into()
     }
 
@@ -238,6 +241,10 @@ impl<F: Clone + Copy + Default + Send + Sync> Poly<F> {
         reverse_matrix_index_bits(&mut mat);
         mat.values.into()
     }
+
+    pub fn mat(&self, width: usize) -> RowMajorMatrixView<'_, F> {
+        RowMajorMatrixView::new(&self.0, width)
+    }
 }
 
 impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
@@ -297,6 +304,7 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         A: Field,
         Ext: ExtensionField<A>,
     {
+        assert_eq!(self.k(), point.k());
         let constant = (self.len() == 1).then_some(*self.first().unwrap());
         if let Some(constant) = constant {
             return constant.into();
@@ -306,7 +314,6 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         let left = left.eq(Ext::ONE);
         let right = right.eq(Ext::ONE);
 
-        assert_eq!(self.k(), left.k() + right.k());
         self.par_chunks(left.len())
             .zip_eq(right.par_iter())
             .map(|(part, &c)| {
@@ -324,6 +331,7 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         A: Field,
         Ext: ExtensionField<A>,
     {
+        assert_eq!(self.k(), point.k());
         let constant = (self.len() == 1).then_some(*self.first().unwrap());
         if let Some(constant) = constant {
             return constant.into();
@@ -334,10 +342,6 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         let left = left.eq_packed(Ext::ONE);
         let right = right.eq(Ext::ONE);
 
-        assert_eq!(
-            self.k(),
-            left.k() + right.k() + log2_strict_usize(A::Packing::WIDTH)
-        );
         let sum = poly
             .par_chunks(left.len())
             .zip_eq(right.par_iter())
