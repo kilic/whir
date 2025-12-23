@@ -191,12 +191,7 @@ impl<
         Transcript: Writer<F> + Writer<[F; OUT]>,
     {
         let k = data.k();
-        let leaf = data
-            .data
-            .row(index)
-            .unwrap()
-            .into_iter()
-            .collect::<Vec<_>>();
+        let leaf = data.data.row_slice(index).unwrap().to_vec();
         transcript.write_hint_many(&Ext::flatten_to_base(leaf.clone()))?;
 
         #[cfg(debug_assertions)]
