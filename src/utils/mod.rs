@@ -24,7 +24,7 @@ impl<V> TwoAdicSlice<V> for &[V] {}
 impl<V> TwoAdicSlice<V> for &mut [V] {}
 
 #[inline]
-pub fn unpack_into<F: Field, Ext: ExtensionField<F>>(
+pub(crate) fn unpack_into<F: Field, Ext: ExtensionField<F>>(
     out: &mut [Ext],
     packed: &[Ext::ExtensionPacking],
 ) {
@@ -43,14 +43,16 @@ pub fn unpack_into<F: Field, Ext: ExtensionField<F>>(
 }
 
 #[inline]
-pub fn unpack<F: Field, Ext: ExtensionField<F>>(packed: &[Ext::ExtensionPacking]) -> Vec<Ext> {
+pub(crate) fn unpack<F: Field, Ext: ExtensionField<F>>(
+    packed: &[Ext::ExtensionPacking],
+) -> Vec<Ext> {
     let mut out = Ext::zero_vec(packed.len() * F::Packing::WIDTH);
     unpack_into(&mut out, packed);
     out
 }
 
 #[inline]
-pub fn pack<F: Field, Ext: ExtensionField<F>>(packed: &[Ext]) -> Vec<Ext::ExtensionPacking> {
+pub(crate) fn pack<F: Field, Ext: ExtensionField<F>>(packed: &[Ext]) -> Vec<Ext::ExtensionPacking> {
     packed
         .par_chunks(F::Packing::WIDTH)
         .with_min_len(1 << 14)

@@ -32,6 +32,16 @@ pub(crate) fn eval_pow_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Po
         .product()
 }
 
+pub fn eval_poly_reference<F: Field, Ext: ExtensionField<F>>(
+    poly: &[F],
+    point: &Point<Ext>,
+) -> Ext {
+    poly.iter()
+        .zip(point.eq(Ext::ONE).iter())
+        .map(|(&coeff, &eq)| eq * coeff)
+        .sum::<Ext>()
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Point<F: Field>(pub Vec<F>);
 
@@ -121,7 +131,7 @@ impl<F: Field> Point<F> {
 
     pub fn eq(&self, scale: F) -> Poly<F> {
         if self.is_empty() {
-            return vec![F::ONE].into();
+            return vec![scale].into();
         }
         assert_ne!(scale, F::ZERO);
         let k = self.len();
@@ -248,6 +258,28 @@ impl<F: Clone + Copy + Default + Send + Sync> Poly<F> {
 }
 
 impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
+    pub fn eval_univariate_packed<F, Ext>(&self, point: Ext) -> Ext
+    where
+        F: Field,
+        Ext: ExtensionField<F, ExtensionPacking = A>,
+        A: PackedFieldExtension<F, Ext>,
+    {
+        let exp = point.exp_u64(F::Packing::WIDTH as u64);
+        let packed_acc = self.iter().rfold(A::ZERO, |acc, &next| acc * exp + next);
+        let unpacked = A::to_ext_iter([packed_acc]).collect::<Vec<_>>();
+        unpacked
+            .iter()
+            .rfold(Ext::ZERO, |acc, &next| acc * point + next)
+    }
+
+    pub fn eval_univariate<Ext>(&self, point: Ext) -> Ext
+    where
+        A: Field,
+        Ext: ExtensionField<A>,
+    {
+        crate::utils::par_horner(self, point)
+    }
+
     pub fn eval_packed<F, Ext>(&self, point: &Point<Ext>) -> Ext
     where
         F: Field,
@@ -277,83 +309,50 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         Ext::ExtensionPacking::to_ext_iter([packed]).sum::<Ext>()
     }
 
-    pub fn eval_univariate_packed<F, Ext>(&self, point: Ext) -> Ext
-    where
-        F: Field,
-        Ext: ExtensionField<F, ExtensionPacking = A>,
-        A: PackedFieldExtension<F, Ext>,
-    {
-        let exp = point.exp_u64(F::Packing::WIDTH as u64);
-        let packed_acc = self.iter().rfold(A::ZERO, |acc, &next| acc * exp + next);
-        let unpacked = A::to_ext_iter([packed_acc]).collect::<Vec<_>>();
-        unpacked
-            .iter()
-            .rfold(Ext::ZERO, |acc, &next| acc * point + next)
-    }
-
-    pub fn eval_univariate<Ext>(&self, point: Ext) -> Ext
-    where
-        A: Field,
-        Ext: ExtensionField<A>,
-    {
-        crate::utils::par_horner(self, point)
-    }
-
     pub fn eval<Ext>(&self, point: &Point<Ext>) -> Ext
     where
         A: Field,
         Ext: ExtensionField<A>,
     {
-        assert_eq!(self.k(), point.k());
+        let k = self.k();
+        assert_eq!(k, point.k());
         let constant = (self.len() == 1).then_some(*self.first().unwrap());
         if let Some(constant) = constant {
             return constant.into();
         }
+        let k_pack = log2_strict_usize(A::Packing::WIDTH);
 
         let (left, right) = point.split_at(point.len() / 2);
-        let left = left.eq(Ext::ONE);
         let right = right.eq(Ext::ONE);
 
-        self.par_chunks(left.len())
-            .zip_eq(right.par_iter())
-            .map(|(part, &c)| {
-                part.iter()
-                    .zip_eq(left.iter())
-                    .map(|(&a, &b)| b * a)
-                    .sum::<Ext>()
-                    * c
-            })
-            .sum()
-    }
-
-    pub fn eval_base<Ext>(&self, point: &Point<Ext>) -> Ext
-    where
-        A: Field,
-        Ext: ExtensionField<A>,
-    {
-        assert_eq!(self.k(), point.k());
-        let constant = (self.len() == 1).then_some(*self.first().unwrap());
-        if let Some(constant) = constant {
-            return constant.into();
+        if k < k_pack * 2 {
+            let left = left.eq(Ext::ONE);
+            self.par_chunks(left.len())
+                .zip_eq(right.par_iter())
+                .map(|(part, &c)| {
+                    part.iter()
+                        .zip_eq(left.iter())
+                        .map(|(&a, &b)| b * a)
+                        .sum::<Ext>()
+                        * c
+                })
+                .sum()
+        } else {
+            let poly = A::Packing::pack_slice(self);
+            let left = left.eq_packed(Ext::ONE);
+            let sum = poly
+                .par_chunks(left.len())
+                .zip_eq(right.par_iter())
+                .map(|(part, &c)| {
+                    part.iter()
+                        .zip_eq(left.iter())
+                        .map(|(&a, &b)| b * a)
+                        .sum::<Ext::ExtensionPacking>()
+                        * c
+                })
+                .sum::<Ext::ExtensionPacking>();
+            unpack(&[sum]).into_iter().sum::<Ext>()
         }
-        let poly = A::Packing::pack_slice(self);
-
-        let (left, right) = point.split_at(point.len() / 2);
-        let left = left.eq_packed(Ext::ONE);
-        let right = right.eq(Ext::ONE);
-
-        let sum = poly
-            .par_chunks(left.len())
-            .zip_eq(right.par_iter())
-            .map(|(part, &c)| {
-                part.iter()
-                    .zip_eq(left.iter())
-                    .map(|(&a, &b)| b * a)
-                    .sum::<Ext::ExtensionPacking>()
-                    * c
-            })
-            .sum::<Ext::ExtensionPacking>();
-        unpack(&[sum]).into_iter().sum::<Ext>()
     }
 
     pub fn fix_var_mut<F: Clone + Copy + Default + Send + Sync>(&mut self, zi: F)
@@ -398,8 +397,49 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
             .into()
     }
 
-    #[cfg(test)]
-    pub(crate) fn pack<F>(&self) -> Poly<A::ExtensionPacking>
+    #[tracing::instrument(skip_all)]
+    pub fn partial_eval<Ext>(&self, point: &Point<Ext>) -> Poly<Ext>
+    where
+        A: Field,
+        Ext: ExtensionField<A>,
+    {
+        assert!(point.len() <= self.k());
+        let eq: Poly<Ext> = point.eq(Ext::ONE);
+        let chunk_size = self.len() / eq.len();
+        let mut out = Ext::zero_vec(chunk_size);
+        self.chunks(chunk_size)
+            .zip_eq(eq.iter())
+            .for_each(|(chunk, &r)| {
+                out.par_iter_mut()
+                    .zip_eq(chunk.par_iter())
+                    .for_each(|(acc, &poly)| *acc += r * poly);
+            });
+        out.into()
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn partial_eval_into_packed<Ext>(&self, point: &Point<Ext>) -> Poly<Ext::ExtensionPacking>
+    where
+        A: Field,
+        Ext: ExtensionField<A>,
+    {
+        assert!(point.len() <= self.k());
+        let eq: Poly<Ext> = point.eq(Ext::ONE);
+        let chunk_size = self.len() / eq.len();
+        let mut out = Ext::ExtensionPacking::zero_vec(chunk_size / A::Packing::WIDTH);
+        self.chunks(chunk_size)
+            .zip_eq(eq.iter())
+            .for_each(|(chunk, &r)| {
+                let r = Ext::ExtensionPacking::from(r);
+                let chunk = A::Packing::pack_slice(chunk);
+                out.par_iter_mut()
+                    .zip_eq(chunk.par_iter())
+                    .for_each(|(acc, &poly)| *acc += r * poly);
+            });
+        out.into()
+    }
+
+    pub fn pack<F>(&self) -> Poly<A::ExtensionPacking>
     where
         F: Field,
         A: ExtensionField<F>,
@@ -419,11 +459,12 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
 
 #[cfg(test)]
 mod test {
-    use crate::poly::{Point, Poly};
+    use crate::poly::{Point, Poly, eval_poly_reference};
     use p3_field::extension::BinomialExtensionField;
-    use p3_field::{ExtensionField, Field, PrimeCharacteristicRing};
+    use p3_field::{Field, PackedValue, PrimeCharacteristicRing};
     type F = p3_koala_bear::KoalaBear;
     type Ext = BinomialExtensionField<F, 4>;
+    use p3_util::log2_strict_usize;
     use rand::Rng;
 
     #[test]
@@ -455,42 +496,51 @@ mod test {
 
     #[test]
     fn test_multilinear() {
-        fn eval_ref<F: Field, Ext: ExtensionField<F>>(poly: &Poly<F>, point: &Point<Ext>) -> Ext {
-            poly.iter()
-                .zip(point.eq(Ext::ONE).iter())
-                .map(|(&coeff, &eq)| eq * coeff)
-                .sum::<Ext>()
-        }
-
         let mut rng = crate::test::rng(1);
 
+        // base field
         for k in 1..=10 {
-            let poly = Poly::<Ext>::rand(&mut rng, k);
+            for d in 1..=k {
+                let poly = Poly::<F>::rand(&mut rng, k);
+                let point: Point<Ext> = Point::rand(&mut rng, d);
 
-            {
-                let point = Point::<Ext>::rand(&mut rng, k);
-                let e0 = eval_ref(&poly, &point);
-                let e1 = poly.eval(&point);
-                assert_eq!(e0, e1);
-
-                if k >= 4 {
-                    let poly_packed = poly.pack::<F>();
-                    let e1 = poly_packed.eval_packed::<F, Ext>(&point);
-                    assert_eq!(e0, e1);
+                let mut fixed: Poly<Ext> = poly.fix_var(point[0]);
+                assert_eq!(fixed, poly.partial_eval(&point.range(..1)));
+                for i in 1..d {
+                    fixed.fix_var_mut(point[i]);
+                    assert_eq!(fixed, poly.partial_eval(&point.range(..=i).reversed()));
                 }
 
-                {
-                    let mut poly = poly.fix_var(*point.last().unwrap());
-                    point.iter().rev().skip(1).for_each(|&var| {
-                        let input_poly = poly.clone();
-                        poly.fix_var_mut(var);
-                        if input_poly.k() >= 4 {
-                            let mut poly_packed = input_poly.pack::<F>();
-                            poly_packed.fix_var_mut(var);
-                            assert_eq!(poly_packed.unpack(), poly);
-                        }
-                    });
-                    assert_eq!(e0, poly.constant().unwrap());
+                if d == k {
+                    let e0 = eval_poly_reference(&poly, &point);
+                    assert_eq!(e0, poly.eval(&point));
+                    assert_eq!(e0, poly.partial_eval(&point).constant().unwrap());
+                }
+            }
+        }
+
+        // extension field
+        let k_pack = log2_strict_usize(<F as Field>::Packing::WIDTH);
+        for k in 1..=10 {
+            for d in 1..=k {
+                let poly = Poly::<Ext>::rand(&mut rng, k);
+                let point: Point<Ext> = Point::rand(&mut rng, d);
+
+                let mut fixed: Poly<Ext> = poly.fix_var(point[0]);
+                assert_eq!(fixed, poly.partial_eval(&point.range(..1)));
+                for i in 1..d {
+                    fixed.fix_var_mut(point[i]);
+                    assert_eq!(fixed, poly.partial_eval(&point.range(..=i).reversed()));
+                }
+
+                if d == k {
+                    let e0 = eval_poly_reference(&poly, &point);
+                    assert_eq!(e0, poly.eval(&point));
+                    assert_eq!(e0, poly.partial_eval(&point).constant().unwrap());
+
+                    if poly.k() >= 2 * k_pack {
+                        assert_eq!(e0, poly.pack::<F>().eval_packed::<F, Ext>(&point));
+                    }
                 }
             }
         }

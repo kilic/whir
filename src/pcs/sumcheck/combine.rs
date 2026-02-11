@@ -1,6 +1,6 @@
 use crate::{
     p3_field_prelude::*,
-    pcs::{EqClaim, PowClaim},
+    pcs::sumcheck::{EqClaim, PowClaim},
     utils::VecOps,
 };
 use p3_util::log2_strict_usize;
@@ -488,13 +488,12 @@ pub(crate) mod pow {
 mod test {
     use crate::p3_field_prelude::*;
 
+    use crate::pcs::sumcheck::combine::{combine_claims, combine_claims_packed};
+    use crate::pcs::sumcheck::{EqClaim, PowClaim};
     use crate::pcs::test::{make_eq_claims, make_pow_claims};
+    use crate::poly::{Point, Poly};
     use crate::transcript::test_transcript::TestWriter;
     use crate::utils::{VecOps, unpack};
-    use crate::{
-        pcs::sumcheck::{combine_claims, combine_claims_packed},
-        poly::{Point, Poly},
-    };
     use p3_util::log2_strict_usize;
     use rand::Rng;
 
@@ -552,11 +551,8 @@ mod test {
                 let pow_claims =
                     make_pow_claims::<_, F, Ext>(&mut transcript, n_pows, &unpacked).unwrap();
 
-                let points = eq_claims
-                    .iter()
-                    .map(|c| c.point().clone())
-                    .collect::<Vec<_>>();
-                let vars = pow_claims.iter().map(|c| c.var()).collect::<Vec<_>>();
+                let points = eq_claims.iter().map(EqClaim::point).collect::<Vec<_>>();
+                let vars = pow_claims.iter().map(PowClaim::var).collect::<Vec<_>>();
                 let acc0 = combine_naive(k, alpha, &points, &vars);
 
                 {

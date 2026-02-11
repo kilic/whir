@@ -7,9 +7,8 @@ use p3_matrix::dense::RowMajorMatrixView;
 use crate::{
     merkle::{MerkleData, MerkleTree, MerkleTreeExt},
     pcs::{
-        EqClaim, PowClaim,
         params::{SecurityAssumption, compute_number_of_rounds},
-        sumcheck::{Sumcheck, SumcheckVerifier},
+        sumcheck::{EqClaim, PowClaim, Sumcheck, SumcheckVerifier, split::PolyEvaluator},
     },
     poly::{Point, Poly},
     transcript::{Challenge, ChallengeBits, Reader, Writer},
@@ -171,9 +170,8 @@ impl<
         &self,
         dft: &Dft,
         transcript: &mut Transcript,
-        claims: Vec<EqClaim<Ext, Ext>>,
         comm_data: MT::MerkleData,
-        poly: Poly<F>,
+        mut ev: PolyEvaluator<F, Ext>,
     ) -> Result<(), crate::Error>
     where
         Transcript: Writer<F>
@@ -183,28 +181,19 @@ impl<
             + Challenge<F, Ext>
             + ChallengeBits,
     {
-        assert_eq!(poly.k(), self.k);
+        assert_eq!(ev.k(), self.k);
 
         // generate out-of-domain claims
-        let ood_claims = tracing::info_span!("ood claims").in_scope(|| {
+        tracing::info_span!("ood claims").in_scope(|| {
             let n_ood_queries = self.n_ood_queries(self.k, self.rate);
             (0..n_ood_queries)
-                .map(|_| {
-                    let point: Ext = Challenge::draw(transcript);
-                    let point = Point::expand(poly.k(), point);
-                    let eval = poly.eval_base::<Ext>(&point);
-                    transcript.write(eval)?;
-                    Ok(EqClaim::new(point, eval))
-                })
+                .map(|_| ev.add_claim(transcript))
                 .collect::<Result<Vec<_>, _>>()
         })?;
 
-        // concat original claims with ood claims
-        let claims = itertools::chain!(claims, ood_claims).collect::<Vec<_>>();
-
         // initialize the sumcheck instance
         // `self.folding` number of rounds is run
-        let mut sumcheck = Sumcheck::new(transcript, self.folding, &claims, &poly)?;
+        let mut sumcheck = Sumcheck::new(transcript, ev, self.folding)?;
 
         // derive number of rounds
         let (n_rounds, final_sumcheck_rounds) = compute_number_of_rounds(self.folding, self.k);
