@@ -1,0 +1,30 @@
+[package]
+name = "p3ml-poly"
+
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+common.workspace = true
+
+itertools.workspace = true
+rand.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+
+p3-field.workspace = true
+p3-matrix.workspace = true
+p3-maybe-rayon.workspace = true
+p3-symmetric.workspace = true
+p3-util.workspace = true
+
+[dev-dependencies]
+common = { workspace = true, features = ["test-utils"] }
+p3-baby-bear.workspace = true
+p3-goldilocks.workspace = true
+p3-koala-bear.workspace = true
+
+[features]
+default = ["parallel"]
+parallel = ["p3-maybe-rayon/parallel", "p3-util/parallel"]

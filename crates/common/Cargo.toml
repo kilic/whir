@@ -1,0 +1,27 @@
+[package]
+name = "p3ml-common"
+
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+itertools.workspace = true
+p3-field.workspace = true
+p3-maybe-rayon.workspace = true
+p3-util.workspace = true
+rand.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+
+p3-baby-bear = {workspace = true, optional = true}
+p3-goldilocks = {workspace = true, optional = true}
+p3-koala-bear = {workspace = true, optional = true}
+tracing-forest = {workspace = true, optional = true}
+tracing-subscriber = {workspace = true, optional = true}
+
+[features]
+default = ["parallel"]
+field-impl = ["p3-baby-bear", "p3-goldilocks", "p3-koala-bear"]
+parallel = ["p3-maybe-rayon/parallel", "p3-util/parallel"]
+test-utils = ["tracing-forest", "tracing-subscriber"]

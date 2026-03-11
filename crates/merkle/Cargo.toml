@@ -1,0 +1,30 @@
+[package]
+name = "p3ml-merkle"
+
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+common.workspace = true
+transcript.workspace = true
+
+bincode.workspace = true
+digest.workspace = true
+p3-field.workspace = true
+p3-matrix.workspace = true
+p3-maybe-rayon.workspace = true
+p3-symmetric.workspace = true
+p3-util.workspace = true
+rayon.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+common = { workspace = true, features = ["test-utils"] }
+p3-koala-bear.workspace = true
+rand.workspace = true
+
+[features]
+default = ["parallel"]
+parallel = ["p3-maybe-rayon/parallel", "p3-util/parallel"]
