@@ -28,8 +28,7 @@ pub fn commit_base<Transcript, F: TwoAdicField, Dft: TwoAdicSubgroupDft<F>, MT: 
 where
     Transcript: Writer<<MT::MerkleData as MerkleData<F>>::Digest>,
 {
-    let width = 1 << (poly.k() - folding);
-    let mut mat = RowMajorMatrix::new(poly.to_vec(), poly.len() / width);
+    let mut mat = RowMajorMatrix::new(poly.to_vec(), 1 << folding);
     mat.pad_to_height(1 << (poly.k() + rate - folding), F::ZERO);
     let codeword = tracing::info_span!("dft-base", height = mat.height(), width = mat.width())
         .in_scope(|| dft.dft_batch(mat).to_row_major_matrix());
@@ -54,8 +53,7 @@ pub fn commit_ext<
 where
     Transcript: Writer<<MT::MerkleData as MerkleData<Ext>>::Digest>,
 {
-    let width = 1 << (poly.k() - folding);
-    let mut mat = RowMajorMatrix::new(poly.to_vec(), poly.len() / width);
+    let mut mat = RowMajorMatrix::new(poly.to_vec(), 1 << folding);
     mat.pad_to_height(1 << (poly.k() + rate - folding), Ext::ZERO);
     let codeword = tracing::info_span!("dft-ext", h = mat.height(), w = mat.width())
         .in_scope(|| dft.dft_algebra_batch(mat));

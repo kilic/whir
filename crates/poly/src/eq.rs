@@ -2,7 +2,9 @@ use common::field::*;
 use common::utils::{TwoAdicSlice, unpack};
 use itertools::Itertools;
 use p3_util::log2_strict_usize;
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::{PackedExtPoly, Point, Poly};
@@ -482,6 +484,56 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
                         .collect::<Vec<_>>()
                         .into()
                 }
+            }
+        }
+    }
+
+    pub fn compress_lo_into(&self, out: &mut [Ext], poly: &Poly<F>) {
+        assert!(self.k() <= poly.k());
+        assert_eq!(out.len(), poly.len() >> self.k());
+
+        match &self.eq0 {
+            MaybePacked::Unpacked(eq0) => {
+                if poly.k() < 15 {
+                    let size_outer = 1 << self.k();
+                    out.iter_mut()
+                        .zip_eq(poly.chunks(size_outer))
+                        .for_each(|(out, chunk)| {
+                            *out = chunk
+                                .chunks(eq0.len())
+                                .zip_eq(self.eq1.iter())
+                                .map(|(chunk, &w1)| {
+                                    chunk
+                                        .iter()
+                                        .zip_eq(eq0.iter())
+                                        .map(|(&f, &w0)| w0 * f)
+                                        .sum::<Ext>()
+                                        * w1
+                                })
+                                .sum::<Ext>();
+                        });
+                } else {
+                    let size_outer = 1 << self.k();
+                    out.par_iter_mut()
+                        .zip(poly.par_chunks(size_outer))
+                        .for_each(|(out, chunk)| {
+                            *out = chunk
+                                .chunks(eq0.len())
+                                .zip_eq(self.eq1.iter())
+                                .map(|(chunk, &w1)| {
+                                    chunk
+                                        .iter()
+                                        .zip_eq(eq0.iter())
+                                        .map(|(&f, &w0)| w0 * f)
+                                        .sum::<Ext>()
+                                        * w1
+                                })
+                                .sum::<Ext>();
+                        });
+                }
+            }
+            MaybePacked::Packed(_) => {
+                unimplemented!();
             }
         }
     }

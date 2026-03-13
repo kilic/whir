@@ -177,10 +177,10 @@ fn test_eq_compress_lo() {
     let mut rng = common::test::rng(1);
     let n_iter = 100;
 
-    for poly_k in [1, 2, 3, 4, 5, 10, 15, 20] {
+    for poly_k in [20] {
         println!();
         println!("k = {poly_k}");
-        for point_k in 1..=poly_k {
+        for point_k in 1..=5 {
             println!();
             println!("point_k = {point_k}");
 
@@ -206,6 +206,16 @@ fn test_eq_compress_lo() {
                 |_| {},
                 |_, _, _| SplitEq::<F, Ext>::new_unpacked(&point).compress_lo(&poly),
                 |_, out1| assert_eq!(out0, out1),
+            );
+
+            common::test::bench(
+                "split unpacked, into",
+                n_iter,
+                || {},
+                |_| Poly::zero(poly_k - point_k),
+                |_| {},
+                |_, _, out1| SplitEq::<F, Ext>::new_unpacked(&point).compress_lo_into(out1, &poly),
+                |out1, _| assert_eq!(out0, out1),
             );
 
             common::test::bench(

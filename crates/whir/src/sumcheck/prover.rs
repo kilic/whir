@@ -106,8 +106,16 @@ impl<F: Field, Ext: ExtensionField<F>> ProverStack<F, Ext> {
             off += size;
         });
 
+        let mut poly = Poly::<F>::zero(k);
+        for (selector, &id) in layout.iter() {
+            let src = &self.polys[id];
+            let off = selector.index() << src.k();
+            poly[off..off + src.len()].copy_from_slice(src);
+        }
+
         ProverLayout {
             k,
+            poly,
             stack: self,
             layout,
             virtual_claims: Default::default(),
@@ -118,6 +126,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverStack<F, Ext> {
 #[derive(Debug, Clone)]
 pub struct ProverLayout<F: Field, Ext: ExtensionField<F>> {
     k: usize,
+    poly: Poly<F>,
     stack: ProverStack<F, Ext>,
     layout: BTreeMap<Selector, usize>,
     virtual_claims: Vec<VirtualClaim<Ext>>,
@@ -134,6 +143,10 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
 
     pub fn n_claims(&self) -> usize {
         self.stack.claims.len() + self.virtual_claims.len()
+    }
+
+    pub fn poly(&self) -> &Poly<F> {
+        &self.poly
     }
 
     fn claims_in_layout_order(&self) -> impl Iterator<Item = (&Selector, usize)> + '_ {
@@ -196,12 +209,12 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
     fn compress_stacked(&self, rs: &Point<Ext>) -> Poly<Ext> {
         assert!(rs.k() <= self.k);
         let mut out = Poly::<Ext>::zero(self.k - rs.k());
+        let rs = SplitEq::new_unpacked(rs);
         for (selector, &id) in self.layout.iter() {
             assert!(rs.k() <= self.stack.k_poly(id));
             let poly = &self.stack.polys[id];
-            let compressed = poly.compress_lo(rs, Ext::ONE);
             let off = selector.index() << (poly.k() - rs.k());
-            out[off..off + compressed.len()].copy_from_slice(&compressed);
+            rs.compress_lo_into(&mut out[off..off + (1 << poly.k() - rs.k())], poly);
         }
         out
     }
@@ -276,7 +289,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
         let mut sum = self.sum(alpha);
         let mut rs = Point::<Ext>::default();
 
-        let accumulators0 = self
+        let accumulators = self
             .stack
             .point_to_claim_map
             .values()
@@ -295,7 +308,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
             let mut acc0 = vec![Ext::ZERO; weights.len()];
             let mut acc2 = vec![Ext::ZERO; weights.len()];
 
-            for accumulators in accumulators0.iter() {
+            for accumulators in accumulators.iter() {
                 acc0.iter_mut()
                     .zip(accumulators[round_idx][0].iter())
                     .for_each(|(acc, &w)| *acc += w);
