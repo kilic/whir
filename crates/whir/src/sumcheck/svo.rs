@@ -15,27 +15,6 @@ pub(super) fn lagrange_weights_012_multi<F: Field>(rs: &[F]) -> Vec<F> {
     weights
 }
 
-fn points_012<F: Field>(l: usize) -> [Vec<Point<F>>; 2] {
-    fn expand<F: Field>(pts: &[Point<F>], values: &[F]) -> Vec<Point<F>> {
-        values
-            .iter()
-            .flat_map(|&v| {
-                pts.iter().cloned().map(move |mut p| {
-                    p.push(v);
-                    p
-                })
-            })
-            .collect::<Vec<_>>()
-    }
-
-    assert!(l > 0);
-    let mut pts = vec![Point::new(vec![])];
-    for _ in 0..l - 1 {
-        pts = expand(&pts, &[F::ZERO, F::ONE, F::TWO]);
-    }
-    [expand(&pts, &[F::ZERO]), expand(&pts, &[F::TWO])]
-}
-
 fn svo_partial_evals<F: Field, Ext: ExtensionField<F>>(
     l: usize,
     compressed: &[Ext],
@@ -58,16 +37,6 @@ fn svo_partial_evals<F: Field, Ext: ExtensionField<F>>(
     out
 }
 
-fn eval_ext_poly_base_point<F: Field, Ext: ExtensionField<F>>(
-    poly: &[Ext],
-    point: &Point<F>,
-) -> Ext {
-    poly.iter()
-        .zip(point.eq(F::ONE).iter())
-        .map(|(&coeff, &eq)| coeff * eq)
-        .sum::<Ext>()
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SvoAccumulators<Ext: Field>(Vec<[Vec<Ext>; 2]>);
 
@@ -85,21 +54,8 @@ impl<Ext: Field> core::ops::DerefMut for SvoAccumulators<Ext> {
     }
 }
 
-impl<Ext: Field> SvoAccumulators<Ext> {
-    fn empty(k: usize) -> Self {
-        Self(
-            (0..k)
-                .map(|i| {
-                    let n = 3usize.pow(i as u32);
-                    [Ext::zero_vec(n), Ext::zero_vec(n)]
-                })
-                .collect(),
-        )
-    }
-}
-
 #[derive(Debug, Clone)]
-pub struct SvoPoint<F: Field, Ext: ExtensionField<F>> {
+pub(crate) struct SvoPoint<F: Field, Ext: ExtensionField<F>> {
     svo: Point<Ext>,
     split: SplitEq<F, Ext>,
 }
@@ -152,22 +108,22 @@ impl<F: Field, Ext: ExtensionField<F>> SvoPoint<F, Ext> {
 }
 
 #[derive(Debug, Clone)]
-pub struct SvoClaim<F: Field, Ext: ExtensionField<F>> {
+pub(crate) struct SvoClaim<F: Field, Ext: ExtensionField<F>> {
     point: SvoPoint<F, Ext>,
     partial_evals: Vec<Poly<Ext>>,
     pub(crate) eval: Ext,
 }
 
 impl<F: Field, Ext: ExtensionField<F>> SvoClaim<F, Ext> {
-    pub fn new(point: SvoPoint<F, Ext>, poly: &Poly<F>) -> Self {
+    pub(crate) fn new(point: SvoPoint<F, Ext>, poly: &Poly<F>) -> Self {
         point.eval(poly)
     }
 
-    pub fn eval(&self) -> &Ext {
+    pub(crate) fn eval(&self) -> &Ext {
         &self.eval
     }
 
-    pub fn point(&self) -> &SvoPoint<F, Ext> {
+    pub(crate) fn point(&self) -> &SvoPoint<F, Ext> {
         &self.point
     }
 
@@ -182,54 +138,149 @@ impl<F: Field, Ext: ExtensionField<F>> SvoClaim<F, Ext> {
     fn svo(&self) -> &Point<Ext> {
         self.point.svo()
     }
+}
 
-    #[tracing::instrument(skip_all)]
-    pub fn calculate_accumulators(claims: &[Self], alphas: &[Ext]) -> SvoAccumulators<Ext> {
+#[derive(Debug, Clone)]
+pub(crate) struct SvoCoeffs<F: Field> {
+    eq0: Vec<Poly<F>>,
+    eq2: Vec<Poly<F>>,
+    points0: Vec<Vec<F>>,
+    points2: Vec<Vec<F>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Svo<F: Field> {
+    coeffs: Vec<SvoCoeffs<F>>,
+}
+
+impl<F: Field> Svo<F> {
+    #[tracing::instrument(skip_all, name = "Svo::new")]
+    pub(crate) fn new(l: usize) -> Self {
+        fn extend_eq<F: Field>(prev: &Poly<F>, zi: F) -> Poly<F> {
+            let mut eq = F::zero_vec(prev.len() * 2);
+            let (lo, hi) = eq.split_at_mut(prev.len());
+            lo.iter_mut()
+                .zip(hi.iter_mut())
+                .zip(prev.iter())
+                .for_each(|((lo, hi), &prev)| {
+                    *lo = prev * (F::ONE - zi);
+                    *hi = prev * zi;
+                });
+            eq.into()
+        }
+
+        // This contains eq0/eq1/eq2 points; we only persist eq0/eq2 per layer.
+        let mut prev_eqs = vec![Poly::new(vec![F::ONE])];
+        let mut prev_points = vec![vec![]];
+
+        let coeffs = (0..l)
+            .map(|_| {
+                let prev_len = prev_eqs.len();
+                let mut next_eqs = Vec::with_capacity(prev_len * 3);
+                let mut next_points = Vec::with_capacity(prev_len * 3);
+
+                for i in 0..prev_len {
+                    let eq = extend_eq(&prev_eqs[i], F::ZERO);
+                    let mut point = prev_points[i].clone();
+                    point.push(F::ZERO);
+
+                    next_eqs.push(eq);
+                    next_points.push(point);
+                }
+
+                for i in 0..prev_len {
+                    let eq = extend_eq(&prev_eqs[i], F::ONE);
+                    let mut point = prev_points[i].clone();
+                    point.push(F::ONE);
+
+                    next_eqs.push(eq);
+                    next_points.push(point);
+                }
+
+                for i in 0..prev_len {
+                    let eq = extend_eq(&prev_eqs[i], F::TWO);
+                    let mut point = prev_points[i].clone();
+                    point.push(F::TWO);
+
+                    next_eqs.push(eq);
+                    next_points.push(point);
+                }
+
+                let coeff = SvoCoeffs {
+                    eq0: next_eqs[0..prev_len].to_vec(),
+                    eq2: next_eqs[2 * prev_len..3 * prev_len].to_vec(),
+                    points0: next_points[0..prev_len].to_vec(),
+                    points2: next_points[2 * prev_len..3 * prev_len].to_vec(),
+                };
+                prev_eqs = next_eqs;
+                prev_points = next_points;
+                coeff
+            })
+            .collect();
+
+        Self { coeffs }
+    }
+
+    #[tracing::instrument(skip_all, name = "Svo::calculate_accumulators")]
+    pub(crate) fn calculate_accumulators<Ext: ExtensionField<F>>(
+        &self,
+        claims: &[SvoClaim<F, Ext>],
+        alphas: &[Ext],
+    ) -> SvoAccumulators<Ext> {
         assert_eq!(claims.len(), alphas.len());
         let k = claims
             .iter()
-            .map(|claim| claim.k_svo())
+            .map(SvoClaim::k_svo)
             .all_equal_value()
             .unwrap();
-        let svo = claims
-            .iter()
-            .map(|claim| claim.svo())
-            .all_equal_value()
-            .unwrap();
+        let svo = claims.iter().map(SvoClaim::svo).all_equal_value().unwrap();
 
-        let mut out = SvoAccumulators::empty(k);
-        (0..k).for_each(|round_idx| {
-            let l = round_idx + 1;
-            let mut collapsed = Poly::<Ext>::zero(l);
-            claims
-                .iter()
-                .zip(alphas.iter())
-                .for_each(|(claim, &alpha)| {
-                    collapsed
-                        .iter_mut()
-                        .zip_eq(claim.partial_evals()[round_idx].iter())
-                        .for_each(|(out, &f)| *out += alpha * f);
-                });
+        let out = (0..k)
+            .map(|round_idx| {
+                let l = round_idx + 1;
+                let mut combined = Poly::<Ext>::zero(l);
+                claims
+                    .iter()
+                    .zip(alphas.iter())
+                    .for_each(|(claim, &alpha)| {
+                        combined
+                            .iter_mut()
+                            .zip_eq(claim.partial_evals()[round_idx].iter())
+                            .for_each(|(out, &f)| *out += alpha * f);
+                    });
+                let svo_active = svo.range(..l);
 
-            let svo_active = svo.range(..l);
-            let us = points_012::<F>(l);
-            let acc0 = us[0]
-                .iter()
-                .map(|u| eval_eq_xy(u, &svo_active) * eval_ext_poly_base_point(&collapsed, u))
-                .collect::<Vec<_>>();
-            let acc2 = us[1]
-                .iter()
-                .map(|u| eval_eq_xy(u, &svo_active) * eval_ext_poly_base_point(&collapsed, u))
-                .collect::<Vec<_>>();
-            out.0[round_idx] = [acc0, acc2];
-        });
-        out
+                let acc0 = self.coeffs[round_idx]
+                    .points0
+                    .iter()
+                    .zip(self.coeffs[round_idx].eq0.iter())
+                    .map(|(u, eq)| {
+                        eval_eq_xy(u, &svo_active)
+                            * dot_product::<Ext, _, _>(combined.iter().copied(), eq.iter().copied())
+                    })
+                    .collect::<Vec<_>>();
+
+                let acc2 = self.coeffs[round_idx]
+                    .points2
+                    .iter()
+                    .zip(self.coeffs[round_idx].eq2.iter())
+                    .map(|(u, eq)| {
+                        eval_eq_xy(u, &svo_active)
+                            * dot_product::<Ext, _, _>(combined.iter().copied(), eq.iter().copied())
+                    })
+                    .collect::<Vec<_>>();
+
+                [acc0, acc2]
+            })
+            .collect();
+
+        SvoAccumulators(out)
     }
 }
 
 #[cfg(test)]
 mod test {
-    use super::{SvoClaim, SvoPoint, points_012};
+    use super::{Svo, SvoPoint};
     use common::field::BinomialExtensionField;
     use p3_field::{PrimeCharacteristicRing, dot_product};
     use p3_koala_bear::KoalaBear;
@@ -250,14 +301,18 @@ mod test {
             let point = SvoPoint::<F, Ext>::new(l0, &point);
             let claim = point.eval(&poly);
             assert_eq!(e0, claim.eval);
-            let accumulators = SvoClaim::calculate_accumulators(&[claim], &[Ext::ONE]);
+            let svo = Svo::<F>::new(l0);
+            let accumulators = svo.calculate_accumulators(&[claim], &[Ext::ONE]);
 
             for (i, accumulator) in accumulators.iter().enumerate() {
-                let us = points_012::<F>(i + 1);
-                for (us, accs) in us.iter().zip(accumulator.iter()) {
-                    us.iter().zip(accs.iter()).for_each(|(u, &acc)| {
-                        let poly = poly.compress_lo(u, Ext::ONE);
-                        let eq = eq.compress_lo(u, Ext::ONE);
+                for (us, accs) in [
+                    (svo.coeffs[i].points0.iter(), accumulator[0].iter()),
+                    (svo.coeffs[i].points2.iter(), accumulator[1].iter()),
+                ] {
+                    us.zip(accs).for_each(|(u, &acc)| {
+                        let u = Point::new(u.clone());
+                        let poly = poly.compress_lo(&u, Ext::ONE);
+                        let eq = eq.compress_lo(&u, Ext::ONE);
                         assert_eq!(acc, dot_product(poly.iter().copied(), eq.iter().copied()));
                     });
                 }

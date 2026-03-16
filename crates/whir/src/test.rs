@@ -285,6 +285,6 @@ fn test_whir_poseidon() {
 // #[ignore]
 fn whir_bench() {
     // run with : RUSTFLAGS='-C target-cpu=native'
-    common::test::init_tracing();
+    // common::test::init_tracing();
     run_whir_poseidon(25, 5, 1, 3, SecurityAssumption::JohnsonBound, 123, 1);
 }

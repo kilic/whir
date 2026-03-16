@@ -14,7 +14,7 @@ pub mod prelude {
     pub use crate::{Point, Poly};
 }
 
-pub fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &Point<F>, y: &Point<Ext>) -> Ext {
+pub fn eval_eq_xy<F: Field, Ext: ExtensionField<F>>(x: &[F], y: &[Ext]) -> Ext {
     assert_eq!(x.len(), y.len());
     x.iter()
         .zip(y.iter())
@@ -37,16 +37,6 @@ pub fn eval_poly_reference<F: Field, Ext: ExtensionField<F>>(
     poly.iter()
         .zip(point.eq(Ext::ONE).iter())
         .map(|(&coeff, &eq)| eq * coeff)
-        .sum::<Ext>()
-}
-
-pub fn eval_poly_reference2<F: Field, Ext: ExtensionField<F>>(
-    poly: &[Ext],
-    point: &Point<F>,
-) -> Ext {
-    poly.iter()
-        .zip(point.eq(F::ONE).iter())
-        .map(|(&coeff, &eq)| coeff * eq)
         .sum::<Ext>()
 }
 

@@ -95,6 +95,7 @@ fn test_zkvm() {
     let mut rng = common::test::rng(1);
 
     let k_svo = 7;
+    // init_tracing();
 
     let mut transcript = TestWriter::<Vec<u8>, F>::init();
     let mut stack = ProverStack::<F, Ext>::new(k_svo);

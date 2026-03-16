@@ -5,7 +5,7 @@ use crate::sumcheck::{
     combine::pow::combine_pows_scaled,
     expr::Expression,
     extrapolate_012,
-    svo::{SvoAccumulators, SvoClaim, SvoPoint, lagrange_weights_012_multi},
+    svo::{Svo, SvoAccumulators, SvoClaim, SvoPoint, lagrange_weights_012_multi},
 };
 use common::{field::*, utils::VecOps};
 use p3_field::TwoAdicField;
@@ -115,6 +115,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverStack<F, Ext> {
 
         ProverLayout {
             k,
+            svo: Svo::new(self.k_svo),
             poly,
             stack: self,
             layout,
@@ -126,6 +127,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverStack<F, Ext> {
 #[derive(Debug, Clone)]
 pub struct ProverLayout<F: Field, Ext: ExtensionField<F>> {
     k: usize,
+    svo: Svo<F>,
     poly: Poly<F>,
     stack: ProverStack<F, Ext>,
     layout: BTreeMap<Selector, usize>,
@@ -214,7 +216,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
             assert!(rs.k() <= self.stack.k_poly(id));
             let poly = &self.stack.polys[id];
             let off = selector.index() << (poly.k() - rs.k());
-            rs.compress_lo_into(&mut out[off..off + (1 << poly.k() - rs.k())], poly);
+            rs.compress_lo_into(&mut out[off..off + (1 << (poly.k() - rs.k()))], poly);
         }
         out
     }
@@ -250,7 +252,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
                 (claim, weight)
             })
             .unzip();
-        let accumulators = SvoClaim::calculate_accumulators(&claims, &weights);
+        let accumulators = self.svo.calculate_accumulators::<Ext>(&claims, &weights);
 
         #[cfg(debug_assertions)]
         {
@@ -258,7 +260,8 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
             let point = SvoPoint::<Ext, Ext>::new(self.k_svo(), &point);
             let claim = SvoClaim::<Ext, Ext>::new(point, &poly);
             assert_eq!(eval, claim.eval);
-            let claim_accumulators = SvoClaim::calculate_accumulators(&[claim], &[Ext::ONE]);
+            let claim_accumulators =
+                Svo::<Ext>::new(self.k_svo()).calculate_accumulators(&[claim], &[Ext::ONE]);
             assert_eq!(accumulators, claim_accumulators);
         }
 
@@ -299,7 +302,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
                     .map(|&idx| self.stack.claims[idx].clone())
                     .collect::<Vec<_>>();
                 let alphas = claim_ids.iter().map(|&idx| alphas[idx]).collect::<Vec<_>>();
-                SvoClaim::calculate_accumulators(&claims, &alphas)
+                self.svo.calculate_accumulators(&claims, &alphas)
             })
             .collect::<Vec<_>>();
 
