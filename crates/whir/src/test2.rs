@@ -133,7 +133,7 @@ fn whir_bench2() {
 }
 
 #[test]
-fn test_zkvm_whir2() {
+fn test_leanvm_whir2() {
     // common::test::init_tracing();
 
     type F = p3_koala_bear::KoalaBear;

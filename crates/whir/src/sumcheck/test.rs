@@ -91,7 +91,7 @@ where
 }
 
 #[test]
-fn test_zkvm() {
+fn test_leanvm() {
     let mut rng = common::test::rng(1);
 
     let k_svo = 7;
