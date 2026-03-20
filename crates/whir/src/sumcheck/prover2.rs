@@ -4,7 +4,7 @@ use crate::{
     commit::commit_base_interleaved,
     sumcheck::{
         EqClaim, PowClaim, Selector, SplitEqClaim,
-        expr::{Expression, coeffs_hi_var},
+        expr::{ExpressionPacked, coeffs_hi_var},
         extrapolate_012,
     },
 };
@@ -12,7 +12,7 @@ use common::{field::*, utils::VecOps};
 use merkle::{MerkleData, MerkleTree};
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::TwoAdicField;
-use p3_util::log2_ceil_usize;
+use p3_util::{log2_ceil_usize, log2_strict_usize};
 use poly::{Point, Poly, eq::SplitEq};
 use transcript::{Challenge, Writer};
 
@@ -191,22 +191,24 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
     }
 
     #[tracing::instrument(skip_all)]
-    fn combine_eqs(&self, alpha: Ext) -> Poly<Ext> {
-        let mut out = Poly::<Ext>::zero(self.k);
+    fn combine_eqs(&self, alpha: Ext) -> Poly<Ext::ExtensionPacking> {
+        let k_pack = log2_strict_usize(F::Packing::WIDTH);
+        let mut out = Poly::<Ext::ExtensionPacking>::zero(self.k - k_pack);
         let mut alpha_i = Ext::ONE;
 
-        self.claims_in_layout_order()
-            .for_each(|(selector, claim_idx)| {
-                let point = self.stack.claims[claim_idx].point();
-                let size = 1 << point.k();
-                let off = selector.index() * size;
-                point.combine_into(&mut out[off..off + size], Some(alpha_i));
-                alpha_i *= alpha;
-            });
-
+        tracing::info_span!("combine layout claims").in_scope(|| {
+            self.claims_in_layout_order()
+                .for_each(|(selector, claim_idx)| {
+                    let point = self.stack.claims[claim_idx].point();
+                    let size = 1 << (point.k() - k_pack);
+                    let off = selector.index() * size;
+                    point.combine_into_packed(&mut out[off..off + size], Some(alpha_i));
+                    alpha_i *= alpha;
+                });
+        });
         self.virtual_claims.iter().for_each(|claim| {
-            tracing::info_span!("combine virtual")
-                .in_scope(|| claim.point().combine_into(&mut out, Some(alpha_i)));
+            tracing::info_span!("combine virtual claims")
+                .in_scope(|| claim.point().combine_into_packed(&mut out, Some(alpha_i)));
             alpha_i *= alpha;
         });
         out
@@ -246,32 +248,35 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
         let mut sum = self.sum(alpha);
         let mut weights = self.combine_eqs(alpha);
 
-        let (c0, c2) = coeffs_hi_var(self.poly(), &weights);
+        let poly = F::Packing::pack_slice(&self.poly());
+        let (c0, c2) = coeffs_hi_var(&poly, &weights);
+        let c0 = Ext::ExtensionPacking::to_ext_iter([c0]).sum::<Ext>();
+        let c2 = Ext::ExtensionPacking::to_ext_iter([c2]).sum::<Ext>();
         transcript.write_many(&[c0, c2])?;
         let r: Ext = transcript.draw();
         sum = extrapolate_012(c0, sum - c0, c2, r);
-        let poly = self.poly().fix_hi_var(r);
+        let poly = self.poly().fix_hi_var_to_packed(r);
         weights.fix_hi_var_mut(r);
-        let mut expr = Expression::new(poly, weights);
+        let mut expr = ExpressionPacked::<F, Ext>::new_packed(poly, weights);
 
         let rs = core::iter::once(Ok(r))
             .chain((1..d).map(|_| {
-                let (c0, c2) = expr.coeffs_hi_var();
-                transcript.write_many(&[c0, c2])?;
-                let r: Ext = transcript.draw();
-                sum = extrapolate_012(c0, sum - c0, c2, r);
-                expr.fix_hi_var(r);
+                let r = expr.round(transcript, &mut sum)?;
                 debug_assert_eq!(expr.prod(), sum);
                 Ok(r)
             }))
             .collect::<Result<Vec<_>, _>>()?
             .into();
 
+        let mut poly_unpacked = Poly::<Ext>::zero(expr.k());
+        expr.unpack_poly_into(&mut poly_unpacked);
+
         Ok(SumcheckProver {
             sum,
             rs,
             expr,
             alpha,
+            poly_unpacked,
         })
     }
 }
@@ -280,8 +285,9 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
 pub struct SumcheckProver<F: Field, Ext: ExtensionField<F>> {
     sum: Ext,
     rs: Point<Ext>,
-    expr: Expression<F, Ext>,
+    expr: ExpressionPacked<F, Ext>,
     alpha: Ext,
+    poly_unpacked: Poly<Ext>,
 }
 
 impl<F: Field, Ext: ExtensionField<F>> SumcheckProver<F, Ext> {
@@ -294,7 +300,7 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckProver<F, Ext> {
     }
 
     pub(crate) fn poly(&self) -> &Poly<Ext> {
-        self.expr.poly()
+        &self.poly_unpacked
     }
 
     #[tracing::instrument(skip_all, fields(k = self.k(), eq = eq_claims.len(), pow = pow_claims.len()))]
@@ -312,8 +318,12 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckProver<F, Ext> {
         self.expr
             .combine_claims(&mut self.sum, self.alpha, eq_claims, pow_claims);
         let rs = (0..d)
-            .map(|_| self.expr.round_hi_var(transcript, &mut self.sum))
+            .map(|_| self.expr.round(transcript, &mut self.sum))
             .collect::<Result<Vec<_>, _>>()?;
+
+        let k = self.k();
+        self.poly_unpacked.truncate(1 << k);
+        self.expr.unpack_poly_into(&mut self.poly_unpacked);
 
         self.rs.extend(rs.iter());
         Ok(rs.into())
@@ -323,7 +333,7 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckProver<F, Ext> {
     where
         Transcript: Writer<Ext>,
     {
-        self.expr.write_poly(transcript)
+        transcript.write_many(&self.poly_unpacked)
     }
 
     pub fn k(&self) -> usize {

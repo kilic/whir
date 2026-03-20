@@ -1,14 +1,19 @@
 use itertools::Itertools;
+use p3_util::log2_strict_usize;
 use rayon::{
     iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator},
     slice::ParallelSlice,
 };
 
-use crate::{
-    sumcheck::combine::combine_claims,
-    sumcheck::{EqClaim, PowClaim, extrapolate_012},
+use crate::sumcheck::{
+    EqClaim, PowClaim,
+    combine::{combine_claims, combine_claims_packed},
+    extrapolate_012,
 };
-use common::field::*;
+use common::{
+    field::*,
+    utils::{unpack, unpack_into},
+};
 use poly::Poly;
 use transcript::{Challenge, Writer};
 
@@ -52,7 +57,6 @@ where
         )
 }
 
-// TODO: move combine claims here?
 #[derive(Debug, Clone)]
 pub(crate) struct Expression<F: Field, Ext: ExtensionField<F>> {
     poly: Poly<Ext>,
@@ -95,33 +99,37 @@ impl<F: Field, Ext: ExtensionField<F>> Expression<F, Ext> {
         Ok(r)
     }
 
-    pub(crate) fn round_hi_var<Transcript>(
-        &mut self,
-        transcript: &mut Transcript,
-        sum: &mut Ext,
-    ) -> Result<Ext, common::Error>
-    where
-        Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
-    {
-        let (c0, c2) = coeffs_hi_var(&self.poly, &self.weights);
+    // fn eval(&self, point: &Point<Ext>) -> Ext {
+    //     self.poly.eval_ext(point)
+    // }
 
-        transcript.write_many(&[c0, c2])?;
+    // pub(crate) fn round_hi_var<Transcript>(
+    //     &mut self,
+    //     transcript: &mut Transcript,
+    //     sum: &mut Ext,
+    // ) -> Result<Ext, common::Error>
+    // where
+    //     Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
+    // {
+    //     let (c0, c2) = coeffs_hi_var(&self.poly, &self.weights);
 
-        let r = Challenge::<F, Ext>::draw(transcript);
-        self.fix_hi_var(r);
-        *sum = extrapolate_012(c0, *sum - c0, c2, r);
+    //     transcript.write_many(&[c0, c2])?;
 
-        debug_assert_eq!(*sum, self.prod());
-        Ok(r)
-    }
+    //     let r = Challenge::<F, Ext>::draw(transcript);
+    //     self.fix_hi_var(r);
+    //     *sum = extrapolate_012(c0, *sum - c0, c2, r);
+
+    //     debug_assert_eq!(*sum, self.prod());
+    //     Ok(r)
+    // }
 
     pub(crate) fn poly(&self) -> &Poly<Ext> {
         &self.poly
     }
 
-    pub(crate) fn coeffs_hi_var(&self) -> (Ext, Ext) {
-        coeffs_hi_var(&self.poly, &self.weights)
-    }
+    // pub(crate) fn coeffs_hi_var(&self) -> (Ext, Ext) {
+    //     coeffs_hi_var(&self.poly, &self.weights)
+    // }
 
     pub(crate) fn coeffs_lo_var(&self) -> (Ext, Ext) {
         coeffs_lo_var(&self.poly, &self.weights)
@@ -156,8 +164,149 @@ impl<F: Field, Ext: ExtensionField<F>> Expression<F, Ext> {
         self.weights.fix_lo_var_mut(r);
     }
 
-    pub(crate) fn fix_hi_var(&mut self, r: Ext) {
-        self.poly.fix_hi_var_mut(r);
-        self.weights.fix_hi_var_mut(r);
+    // pub(crate) fn fix_hi_var(&mut self, r: Ext) {
+    //     self.poly.fix_hi_var_mut(r);
+    //     self.weights.fix_hi_var_mut(r);
+    // }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ExpressionPacked<F: Field, Ext: ExtensionField<F>> {
+    Packed {
+        poly: Poly<Ext::ExtensionPacking>,
+        weights: Poly<Ext::ExtensionPacking>,
+    },
+    Small {
+        poly: Poly<Ext>,
+        weights: Poly<Ext>,
+    },
+}
+
+impl<F: Field, Ext: ExtensionField<F>> ExpressionPacked<F, Ext> {
+    pub(crate) fn new_packed(
+        poly: Poly<Ext::ExtensionPacking>,
+        weights: Poly<Ext::ExtensionPacking>,
+    ) -> Self {
+        Self::Packed { poly, weights }
+    }
+
+    // pub(crate) fn new_unpacked(poly: Poly<Ext>, weights: Poly<Ext>) -> Self {
+    //     Self::Small { poly, weights }
+    // }
+
+    pub(crate) fn k(&self) -> usize {
+        let k_pack = log2_strict_usize(F::Packing::WIDTH);
+        match self {
+            Self::Packed { poly, weights } => {
+                let k = poly.k();
+                assert_eq!(k, weights.k());
+                poly.k() + k_pack
+            }
+            Self::Small { poly, weights } => {
+                let k = poly.k();
+                assert_eq!(k, weights.k());
+                poly.k()
+            }
+        }
+    }
+
+    pub(crate) fn round<Transcript>(
+        &mut self,
+        transcript: &mut Transcript,
+        sum: &mut Ext,
+    ) -> Result<Ext, common::Error>
+    where
+        Transcript: Writer<F> + Writer<Ext> + Challenge<F, Ext>,
+    {
+        let (c0, c2) = self.coeffs();
+        transcript.write_many(&[c0, c2])?;
+
+        let r = Challenge::<F, Ext>::draw(transcript);
+        self.fix(r);
+        *sum = extrapolate_012(c0, *sum - c0, c2, r);
+
+        debug_assert_eq!(*sum, self.prod());
+        Ok(r)
+    }
+
+    pub(crate) fn coeffs(&self) -> (Ext, Ext) {
+        match self {
+            Self::Packed { poly, weights } => {
+                let (c0, c2) = coeffs_hi_var(poly, weights);
+                let c0 = Ext::ExtensionPacking::to_ext_iter([c0]).sum::<Ext>();
+                let c2 = Ext::ExtensionPacking::to_ext_iter([c2]).sum::<Ext>();
+                (c0, c2)
+            }
+            Self::Small { poly, weights } => coeffs_hi_var(poly, weights),
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub(crate) fn unpack_poly_into(&self, unpacked: &mut [Ext]) {
+        match self {
+            Self::Packed { poly, .. } => {
+                assert_eq!(
+                    unpacked.len(),
+                    1 << (poly.k() + log2_strict_usize(F::Packing::WIDTH))
+                );
+                unpack_into::<F, Ext>(unpacked, poly);
+            }
+            Self::Small { poly, .. } => unpacked.copy_from_slice(poly),
+        }
+    }
+
+    pub(crate) fn combine_claims(
+        &mut self,
+        sum: &mut Ext,
+        alpha: Ext,
+        eq_claims: &[EqClaim<Ext>],
+        pow_claims: &[PowClaim<F, Ext>],
+    ) {
+        match self {
+            Self::Packed { weights, .. } => {
+                combine_claims_packed::<F, Ext>(weights, sum, alpha, eq_claims, pow_claims);
+            }
+            Self::Small { weights, .. } => {
+                combine_claims::<F, Ext>(weights, sum, alpha, eq_claims, pow_claims);
+            }
+        }
+    }
+
+    pub(crate) fn fix(&mut self, r: Ext) {
+        match self {
+            Self::Packed { poly, weights } => {
+                poly.fix_hi_var_mut(r);
+                weights.fix_hi_var_mut(r);
+            }
+            Self::Small { poly, weights } => {
+                poly.fix_hi_var_mut(r);
+                weights.fix_hi_var_mut(r);
+            }
+        }
+        self.transition();
+    }
+
+    fn transition(&mut self) {
+        if let Self::Packed { poly, weights } = self {
+            let k = poly.k();
+            assert_eq!(k, weights.k());
+            if k == 0 {
+                let poly = unpack::<F, Ext>(poly).into();
+                let weights = unpack::<F, Ext>(weights).into();
+                *self = Self::Small { poly, weights };
+            }
+        }
+    }
+
+    pub(crate) fn prod(&self) -> Ext {
+        match self {
+            Self::Packed { poly, weights } => {
+                let sum_packed = dot_product(poly.iter().cloned(), weights.iter().cloned());
+                Ext::ExtensionPacking::to_ext_iter([sum_packed]).sum::<Ext>()
+            }
+            Self::Small { poly, weights } => {
+                dot_product(poly.iter().cloned(), weights.iter().cloned())
+            }
+        }
     }
 }

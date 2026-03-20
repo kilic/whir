@@ -125,6 +125,14 @@ fn test_whir_poseidon2() {
 }
 
 #[test]
+// #[ignore]
+fn whir_bench2() {
+    // run with : RUSTFLAGS='-C target-cpu=native'
+    // common::test::init_tracing();
+    run_whir_poseidon(25, 5, 1, 3, SecurityAssumption::JohnsonBound, 123, 1);
+}
+
+#[test]
 fn test_zkvm_whir2() {
     // common::test::init_tracing();
 
@@ -272,12 +280,4 @@ fn test_zkvm_whir2() {
         transcript.draw()
     };
     assert_eq!(checkpoint_prover, checkpont_verifier);
-}
-
-#[test]
-// #[ignore]
-fn whir_bench2() {
-    // run with : RUSTFLAGS='-C target-cpu=native'
-    // common::test::init_tracing();
-    run_whir_poseidon(25, 5, 1, 3, SecurityAssumption::JohnsonBound, 123, 1);
 }
