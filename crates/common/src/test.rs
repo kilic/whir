@@ -52,7 +52,7 @@ pub fn bench<Perf, PerfOut, Setup, SetupOut, PreMut, PreMutOut, Pre, PreOut, Pos
 
     let avg = total / n_iter as u32;
     println!(
-        "{:20} N: {n_iter} Avg: {:8.2?} Lowest: {:8.2?}",
+        "{:20} N: {n_iter} Avg: {:8.2?} Low: {:8.2?}",
         name, avg, lowest
     );
 }

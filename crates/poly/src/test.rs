@@ -6,6 +6,7 @@ use p3_field::extension::BinomialExtensionField;
 use p3_util::log2_strict_usize;
 type F = p3_koala_bear::KoalaBear;
 type Ext = BinomialExtensionField<F, 4>;
+type PackedF = <F as p3_field::Field>::Packing;
 use rand::RngExt;
 
 fn combine_into_reference(out: &mut [Ext], eq: &[Ext], alpha: Option<Ext>) {
@@ -126,13 +127,11 @@ fn test_poly() {
 #[test]
 fn test_eq_compress_hi() {
     let mut rng = common::test::rng(1);
-    let n_iter = 100;
+    let n_iter = 1;
 
-    for poly_k in [1, 2, 3, 4, 5, 10, 15, 20] {
-        println!();
+    for poly_k in 4..=20 {
         println!("k = {poly_k}");
         for point_k in 1..=poly_k {
-            println!();
             println!("point_k = {point_k}");
 
             let poly = Poly::<F>::rand(&mut rng, poly_k);
@@ -140,7 +139,7 @@ fn test_eq_compress_hi() {
             let out0 = compress_hi_reference(&poly, &point);
 
             common::test::bench(
-                "partial_eval",
+                "ref",
                 n_iter,
                 || {},
                 |_| {},
@@ -150,24 +149,39 @@ fn test_eq_compress_hi() {
             );
 
             common::test::bench(
-                "split unpacked",
+                "w/o pack",
                 n_iter,
                 || {},
                 |_| {},
                 |_| {},
-                |_, _, _| SplitEq::<F, Ext>::new_unpacked(&point).compress_hi(&poly),
+                |_, _, _| SplitEq::<F, Ext>::new_unpacked(&point, Ext::ONE).compress_hi(&poly),
                 |_, out1| assert_eq!(out0, out1),
             );
 
             common::test::bench(
-                "split packed",
+                "w/  pack",
                 n_iter,
                 || {},
                 |_| {},
                 |_| {},
-                |_, _, _| SplitEq::<F, Ext>::new(&point, Ext::ONE).compress_hi(&poly),
-                |_, out1| assert_eq!(out0, out1),
+                |_, _, _| SplitEq::<F, Ext>::new_packed(&point, Ext::ONE).compress_hi(&poly),
+                |_, out1| assert_eq!(out0, out1.unpack()),
             );
+
+            if poly.k() >= (point.k() + log2_strict_usize(PackedF::WIDTH)) {
+                common::test::bench(
+                    "w/0 pack to_packed",
+                    n_iter,
+                    || {},
+                    |_| {},
+                    |_| {},
+                    |_, _, _| {
+                        SplitEq::<F, Ext>::new_unpacked(&point, Ext::ONE)
+                            .compress_hi_to_packed(&poly)
+                    },
+                    |_, out1| assert_eq!(out0, out1.unpack()),
+                );
+            }
         }
     }
 }
@@ -175,13 +189,11 @@ fn test_eq_compress_hi() {
 #[test]
 fn test_eq_compress_lo() {
     let mut rng = common::test::rng(1);
-    let n_iter = 100;
+    let n_iter = 1;
 
-    for poly_k in [20] {
-        println!();
+    for poly_k in 4..=20 {
         println!("k = {poly_k}");
-        for point_k in 1..=5 {
-            println!();
+        for point_k in 1..=poly_k {
             println!("point_k = {point_k}");
 
             let poly = Poly::<F>::rand(&mut rng, poly_k);
@@ -189,7 +201,7 @@ fn test_eq_compress_lo() {
             let out0 = compress_lo_reference(&poly, &point);
 
             common::test::bench(
-                "partial_eval",
+                "ref",
                 n_iter,
                 || {},
                 |_| {},
@@ -199,33 +211,47 @@ fn test_eq_compress_lo() {
             );
 
             common::test::bench(
-                "split unpacked",
+                "w/o pack",
                 n_iter,
                 || {},
                 |_| {},
                 |_| {},
-                |_, _, _| SplitEq::<F, Ext>::new_unpacked(&point).compress_lo(&poly),
+                |_, _, _| SplitEq::<F, Ext>::new_unpacked(&point, Ext::ONE).compress_lo(&poly),
                 |_, out1| assert_eq!(out0, out1),
             );
 
             common::test::bench(
-                "split unpacked, into",
+                "w/  pack",
+                n_iter,
+                || {},
+                |_| {},
+                |_| {},
+                |_, _, _| SplitEq::<F, Ext>::new_packed(&point, Ext::ONE).compress_lo(&poly),
+                |_, out1| assert_eq!(out0, out1),
+            );
+
+            common::test::bench(
+                "w/o pack into",
                 n_iter,
                 || {},
                 |_| Poly::zero(poly_k - point_k),
                 |_| {},
-                |_, _, out1| SplitEq::<F, Ext>::new_unpacked(&point).compress_lo_into(out1, &poly),
+                |_, _, out1| {
+                    SplitEq::<F, Ext>::new_unpacked(&point, Ext::ONE).compress_lo_into(out1, &poly)
+                },
                 |out1, _| assert_eq!(out0, out1),
             );
 
             common::test::bench(
-                "split packed",
+                "w/  pack into",
                 n_iter,
                 || {},
+                |_| Poly::zero(poly_k - point_k),
                 |_| {},
-                |_| {},
-                |_, _, _| SplitEq::<F, Ext>::new(&point, Ext::ONE).compress_lo(&poly),
-                |_, out1| assert_eq!(out0, out1),
+                |_, _, out1| {
+                    SplitEq::<F, Ext>::new_packed(&point, Ext::ONE).compress_lo_into(out1, &poly)
+                },
+                |out1, _| assert_eq!(out0, out1),
             );
         }
     }
@@ -234,30 +260,30 @@ fn test_eq_compress_lo() {
 #[test]
 fn test_eval_base() {
     let mut rng = common::test::rng(1);
-    let n_iter = 100;
+    let n_iter = 1;
 
-    for k in 10..20 {
+    for k in 4..=20 {
         println!("{k}");
         let poly = Poly::<F>::rand(&mut rng, k);
         let point: Point<Ext> = Point::rand(&mut rng, k);
         let e0 = eval_poly_reference(&poly, &point);
         common::test::bench(
-            "eval base packed",
+            "w/ pack",
             n_iter,
             || {},
             |_| {},
             |_| {},
-            |_, _, _| SplitEq::<F, Ext>::new(&point, Ext::ONE).eval_base(&poly),
+            |_, _, _| SplitEq::<F, Ext>::new_packed(&point, Ext::ONE).eval_base(&poly),
             |_, e1| assert_eq!(e0, e1),
         );
 
         common::test::bench(
-            "eval base unpacked",
+            "w/o pack",
             n_iter,
             || {},
             |_| {},
             |_| {},
-            |_, _, _| SplitEq::<F, Ext>::new_unpacked(&point).eval_base(&poly),
+            |_, _, _| SplitEq::<F, Ext>::new_unpacked(&point, Ext::ONE).eval_base(&poly),
             |_, e1| assert_eq!(e0, e1),
         );
     }
@@ -266,30 +292,54 @@ fn test_eval_base() {
 #[test]
 fn test_eval_ext() {
     let mut rng = common::test::rng(1);
-    let n_iter = 100;
+    let n_iter = 1;
 
-    for k in 10..20 {
+    for k in 4..=20 {
         println!("{k}");
         let poly = Poly::<Ext>::rand(&mut rng, k);
         let point: Point<Ext> = Point::rand(&mut rng, k);
         let e0 = eval_poly_reference(&poly, &point);
+
         common::test::bench(
-            "eval ext packed",
+            "w/ pack",
             n_iter,
             || {},
             |_| {},
             |_| {},
-            |_, _, _| SplitEq::<F, Ext>::new(&point, Ext::ONE).eval_ext(&poly),
+            |_, _, _| SplitEq::<F, Ext>::new_packed(&point, Ext::ONE).eval_ext(&poly),
             |_, e1| assert_eq!(e0, e1),
         );
 
         common::test::bench(
-            "eval ext unpacked",
+            "w/o pack",
             n_iter,
             || {},
             |_| {},
             |_| {},
-            |_, _, _| SplitEq::<F, Ext>::new_unpacked(&point).eval_ext(&poly),
+            |_, _, _| SplitEq::<F, Ext>::new_unpacked(&point, Ext::ONE).eval_ext(&poly),
+            |_, e1| assert_eq!(e0, e1),
+        );
+    }
+}
+
+#[test]
+fn test_eval_packed() {
+    let mut rng = common::test::rng(1);
+    let n_iter = 1;
+
+    for k in 4..=20 {
+        println!("{k}");
+        let poly = Poly::<Ext>::rand(&mut rng, k);
+        let poly_packed = poly.pack::<F>();
+        let point: Point<Ext> = Point::rand(&mut rng, k);
+        let e0 = eval_poly_reference(&poly, &point);
+        common::test::bench(
+            "w/ pack",
+            n_iter,
+            || {},
+            |_| {},
+            |_| {},
+            |_, _, _| SplitEq::<F, Ext>::new_packed(&point, Ext::ONE).eval_packed(&poly_packed),
             |_, e1| assert_eq!(e0, e1),
         );
     }
@@ -298,127 +348,55 @@ fn test_eval_ext() {
 #[test]
 fn test_combine_into() {
     let mut rng = common::test::rng(1);
-    let n_iter = 100;
+    let n_iter = 1;
 
-    for k in [1, 2, 3, 4, 5, 10, 12, 14, 15, 16, 18, 20] {
-        println!();
+    for k in 4..=20 {
         println!("k = {k}");
 
         let point: Point<Ext> = Point::rand(&mut rng, k);
-        let alpha = Ext::ONE;
-        let eq: Poly<Ext> = point.eq(Ext::ONE);
-        let split_unpacked = SplitEq::<F, Ext>::new_unpacked(&point);
-        let split_packed = SplitEq::<F, Ext>::new(&point, Ext::ONE);
-
-        let out_init: Vec<Ext> = vec![Ext::ZERO; 1 << k];
-
-        let mut expected_none = out_init.clone();
-        combine_into_reference(&mut expected_none, &eq, None);
-
-        let mut expected_alpha = out_init.clone();
-        combine_into_reference(&mut expected_alpha, &eq, Some(alpha));
+        let mut out0 = Poly::zero(k);
+        combine_into_reference(&mut out0, &point.eq(Ext::ONE), None);
 
         common::test::bench(
             "combine ref",
             n_iter,
             || {},
-            |_| out_init.clone(),
+            |_| Poly::zero(k),
             |_| {},
-            |_, _, out| combine_into_reference(out, &eq, None),
-            |out, _| assert_eq!(out, expected_none),
+            |_, _, out| combine_into_reference(out, &point.eq(Ext::ONE), None),
+            |out1, _| assert_eq!(out0, out1),
         );
 
         common::test::bench(
-            "unpacked",
+            "w/o pack",
             n_iter,
             || {},
-            |_| out_init.clone(),
+            |_| Poly::zero(k),
             |_| {},
-            |_, _, out| split_unpacked.combine_into(out, None),
-            |out, _| assert_eq!(out, expected_none),
+            |_, _, out| SplitEq::<F, Ext>::new_unpacked(&point, Ext::ONE).combine_into(out, None),
+            |out1, _| assert_eq!(out0, out1),
         );
 
         common::test::bench(
-            "packed",
+            "w/  pack",
             n_iter,
             || {},
-            |_| out_init.clone(),
+            |_| Poly::zero(k),
             |_| {},
-            |_, _, out| split_packed.combine_into(out, None),
-            |out, _| assert_eq!(out, expected_none),
+            |_, _, out| SplitEq::<F, Ext>::new_packed(&point, Ext::ONE).combine_into(out, None),
+            |out1, _| assert_eq!(out0, out1),
         );
-    }
-}
-
-#[test]
-fn test_combine_into_packed() {
-    let mut rng = common::test::rng(1);
-    let n_iter = 100;
-    type PackedF = <F as p3_field::Field>::Packing;
-    type PackedExt = <Ext as p3_field::ExtensionField<F>>::ExtensionPacking;
-    let k_pack = log2_strict_usize(PackedF::WIDTH);
-    let alpha = Ext::ONE;
-
-    for k in [10, 12, 14, 15, 16, 18, 20] {
-        println!();
-        println!("k = {k}");
-
-        let point: Point<Ext> = Point::rand(&mut rng, k);
-        let split_packed = SplitEq::<F, Ext>::new(&point, Ext::ONE);
-        let out_init: Vec<PackedExt> = PackedExt::zero_vec(1 << (k - k_pack));
-
-        let expected = point.eq_packed::<F>(Ext::ONE);
-        let expected: Vec<PackedExt> = expected.iter().copied().collect();
 
         common::test::bench(
-            "combine into packed",
+            "w/  pack to packed",
             n_iter,
             || {},
-            |_| out_init.clone(),
-            |_| {},
-            |_, _, out| split_packed.combine_into_packed(out, alpha),
-            |out, _| assert_eq!(out, expected),
-        );
-    }
-}
-
-#[test]
-fn test_fix_var_mut_bench() {
-    let mut rng = common::test::rng(1);
-    let n_iter = 100;
-
-    for k in [8, 10, 12, 14, 16, 18, 20] {
-        println!();
-        println!("k = {k}");
-
-        let poly = Poly::<F>::rand(&mut rng, k);
-        let zi: F = rng.random();
-
-        let expected_hi = poly.fix_hi_var(zi);
-        let expected_lo = poly.fix_lo_var(zi);
-
-        common::test::bench(
-            "fix_hi_var_mut",
-            n_iter,
-            || {},
-            |_| poly.clone(),
+            |_| Poly::zero(k - log2_strict_usize(PackedF::WIDTH)),
             |_| {},
             |_, _, out| {
-                out.fix_hi_var_mut(zi);
+                SplitEq::<F, Ext>::new_packed(&point, Ext::ONE).combine_into_packed(out, None)
             },
-            |out, _| assert_eq!(expected_hi, out),
-        );
-
-        common::test::bench(
-            "fix_lo_var_mut",
-            n_iter,
-            || {},
-            |_| poly.clone(),
-            |_| {},
-            |_, _, out| {
-                out.fix_lo_var_mut(zi);
-            },
-            |out, _| assert_eq!(expected_lo, out),
+            |out1, _| assert_eq!(out0, out1.unpack::<F, Ext>()),
         );
     }
 }

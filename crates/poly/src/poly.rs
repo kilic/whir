@@ -14,7 +14,7 @@ use rayon::{
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Poly<F>(pub(crate) Vec<F>);
+pub struct Poly<F>(pub Vec<F>);
 pub type PackedPoly<F> = Poly<<F as Field>::Packing>;
 pub type PackedExtPoly<F, Ext> = Poly<<Ext as ExtensionField<F>>::ExtensionPacking>;
 
@@ -41,6 +41,12 @@ impl<F: Clone + Copy + Default + Send + Sync> Poly<F> {
     pub fn new(values: Vec<F>) -> Self {
         assert!(!values.is_empty());
         assert!(values.len().is_power_of_two());
+        Self(values)
+    }
+
+    pub fn new_sparse(mut values: Vec<F>, k: usize) -> Self {
+        assert!(values.len() <= 1 << k);
+        values.resize(1 << k, F::default());
         Self(values)
     }
 
@@ -83,7 +89,7 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         A: Field,
         Ext: ExtensionField<A>,
     {
-        SplitEq::<A, Ext>::new(point, Ext::ONE).eval_base(self)
+        SplitEq::<A, Ext>::new_packed(point, Ext::ONE).eval_base(self)
     }
 
     pub fn eval_ext<F>(&self, point: &Point<A>) -> A
@@ -91,7 +97,7 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         F: Field,
         A: ExtensionField<F>,
     {
-        SplitEq::<F, A>::new(point, A::ONE).eval_ext(self)
+        SplitEq::<F, A>::new_packed(point, A::ONE).eval_ext(self)
     }
 
     pub fn eval_packed<F, Ext>(&self, point: &Point<Ext>) -> Ext
@@ -100,7 +106,7 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         Ext: ExtensionField<F, ExtensionPacking = A>,
         A: PackedFieldExtension<F, Ext>,
     {
-        SplitEq::<F, Ext>::new(point, Ext::ONE).eval_packed(self)
+        SplitEq::<F, Ext>::new_packed(point, Ext::ONE).eval_packed(self)
     }
 
     pub fn fix_hi_var<Ext>(&self, zi: Ext) -> Poly<Ext>
@@ -126,6 +132,17 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
             .zip(p1.par_iter())
             .for_each(|(a0, &a1)| *a0 += (a1 - *a0) * zi);
         self.truncate(mid);
+    }
+
+    pub fn fix_lo_var<Ext>(&self, zi: Ext) -> Poly<Ext>
+    where
+        A: Field,
+        Ext: ExtensionField<A>,
+    {
+        self.par_chunks(2)
+            .map(|a| zi * (a[1] - a[0]) + a[0])
+            .collect::<Vec<_>>()
+            .into()
     }
 
     pub fn fix_lo_var_mut<F: Clone + Copy + Default + Send + Sync>(&mut self, zi: F)
@@ -158,23 +175,12 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
             .into()
     }
 
-    pub fn fix_lo_var<Ext>(&self, zi: Ext) -> Poly<Ext>
-    where
-        A: Field,
-        Ext: ExtensionField<A>,
-    {
-        self.par_chunks(2)
-            .map(|a| zi * (a[1] - a[0]) + a[0])
-            .collect::<Vec<_>>()
-            .into()
-    }
-
     pub fn compress_lo<Ext>(&self, point: &Point<Ext>, scale: Ext) -> Poly<Ext>
     where
         A: Field,
         Ext: ExtensionField<A>,
     {
-        SplitEq::<A, Ext>::new(point, scale).compress_lo(self)
+        SplitEq::<A, Ext>::new_packed(point, scale).compress_lo(self)
     }
 
     pub fn compress_hi<Ext>(&self, point: &Point<Ext>, scale: Ext) -> Poly<Ext>
@@ -182,7 +188,7 @@ impl<A: Clone + Copy + Default + Send + Sync> Poly<A> {
         A: Field,
         Ext: ExtensionField<A>,
     {
-        SplitEq::<A, Ext>::new(point, scale).compress_hi(self)
+        SplitEq::<A, Ext>::new_packed(point, scale).compress_hi(self)
     }
 
     pub fn compress_lo_to_packed<Ext>(&self, _point: &Point<Ext>) -> Poly<Ext::ExtensionPacking>

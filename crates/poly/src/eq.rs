@@ -86,14 +86,14 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
         k >= log2_strict_usize(F::Packing::WIDTH)
     }
 
-    pub fn new_unpacked(point: &Point<Ext>) -> Self {
+    pub fn new_unpacked(point: &Point<Ext>, scale: Ext) -> Self {
         let (z0, z1) = point.split_at(point.k() / 2);
         let eq0 = MaybePacked::new_unpacked(&z0);
-        let eq1 = z1.eq(Ext::ONE);
+        let eq1 = z1.eq(scale);
         SplitEq { eq0, eq1 }
     }
 
-    pub fn new(point: &Point<Ext>, scale: Ext) -> Self {
+    pub fn new_packed(point: &Point<Ext>, scale: Ext) -> Self {
         let (z0, z1) = point.split_at(point.k() / 2);
         let eq0 = MaybePacked::new(&z0);
         let eq1 = z1.eq(scale);
@@ -107,7 +107,7 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
     pub fn eval_base(&self, poly: &Poly<F>) -> Ext {
         assert_eq!(poly.k(), self.k());
 
-        if let Some(constant) = (poly.len() == 1).then_some(*poly.first().unwrap()) {
+        if let Some(constant) = poly.constant() {
             return constant.into();
         }
 
@@ -141,7 +141,7 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
             }
 
             MaybePacked::Packed(eq0) => {
-                if poly.k() < 17 {
+                if poly.k() < 15 {
                     let poly = F::Packing::pack_slice(poly);
                     let sum = poly
                         .chunks(eq0.len())
@@ -253,7 +253,7 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
         assert_eq!(poly.k() + log2_strict_usize(F::Packing::WIDTH), self.k());
         match &self.eq0 {
             MaybePacked::Packed(eq0) => {
-                if poly.k() < 15 {
+                if poly.k() < 12 {
                     let sum = poly
                         .chunks(eq0.len())
                         .zip_eq(self.eq1.iter())
@@ -298,8 +298,8 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
                     let mut out = Ext::zero_vec(size_inner);
                     poly.chunks(size_outer)
                         .zip(self.eq1.iter())
-                        .for_each(|(block, &w1)| {
-                            block
+                        .for_each(|(chunk, &w1)| {
+                            chunk
                                 .chunks(size_inner)
                                 .zip_eq(eq0.iter())
                                 .for_each(|(chunk, &w0)| {
@@ -311,13 +311,11 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
                         });
                     out.into()
                 } else {
-                    let size_outer = poly.len() / self.eq1.len();
-                    let size_inner = size_outer / eq0.len();
                     poly.par_chunks(size_outer)
                         .zip_eq(self.eq1.par_iter())
-                        .map(|(block, &w1)| {
+                        .map(|(chunk, &w1)| {
                             let mut out = Ext::zero_vec(size_inner);
-                            block
+                            chunk
                                 .chunks(size_inner)
                                 .zip_eq(eq0.iter())
                                 .for_each(|(chunk, &w0)| {
@@ -330,11 +328,11 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
                         })
                         .reduce(
                             || Ext::zero_vec(size_inner),
-                            |mut a, b| {
-                                a.iter_mut()
-                                    .zip_eq(b.iter())
-                                    .for_each(|(acc, &x)| *acc += x);
-                                a
+                            |mut acc, part| {
+                                acc.iter_mut()
+                                    .zip_eq(part.iter())
+                                    .for_each(|(acc, &part)| *acc += part);
+                                acc
                             },
                         )
                         .into()
@@ -346,18 +344,135 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
                 if poly.k() < 15 {
                     let mut out = Ext::zero_vec(size_inner);
                     poly.chunks(size_outer)
-                        .zip(self.eq1.iter())
-                        .for_each(|(block, &w1)| {
-                            block
+                        .zip_eq(self.eq1.iter())
+                        .for_each(|(chunk, &w1)| {
+                            chunk
                                 .chunks(size_inner * F::Packing::WIDTH)
                                 .zip_eq(eq0.iter())
                                 .for_each(|(chunk, &w0)| {
-                                    out.iter_mut().enumerate().for_each(|(i, acc)| {
-                                        let packed =
-                                            F::Packing::from_fn(|j| chunk[j * size_inner + i]);
-                                        *acc += Ext::ExtensionPacking::to_ext_iter([w0 * packed])
-                                            .sum::<Ext>()
-                                            * w1;
+                                    let w: Vec<Ext> = unpack(&[w0 * w1]);
+                                    chunk.chunks(size_inner).zip_eq(w.iter()).for_each(
+                                        |(chunk, &w)| {
+                                            out.iter_mut()
+                                                .zip_eq(chunk.iter())
+                                                .for_each(|(acc, &f)| *acc += w * f);
+                                        },
+                                    );
+                                });
+                        });
+                    out.into()
+                } else {
+                    poly.par_chunks(size_outer)
+                        .zip_eq(self.eq1.par_iter())
+                        .map(|(chunk, &w1)| {
+                            let mut out = Ext::zero_vec(size_inner);
+                            chunk
+                                .chunks(size_inner * F::Packing::WIDTH)
+                                .zip_eq(eq0.iter())
+                                .for_each(|(chunk, &w0)| {
+                                    let w: Vec<Ext> = unpack(&[w0 * w1]);
+                                    chunk.chunks(size_inner).zip_eq(w.iter()).for_each(
+                                        |(chunk, &w)| {
+                                            out.iter_mut()
+                                                .zip_eq(chunk.iter())
+                                                .for_each(|(acc, &f)| *acc += w * f);
+                                        },
+                                    );
+                                });
+                            out
+                        })
+                        .reduce(
+                            || Ext::zero_vec(size_inner),
+                            |mut acc, part| {
+                                acc.iter_mut()
+                                    .zip_eq(part.iter())
+                                    .for_each(|(acc, &part)| *acc += part);
+                                acc
+                            },
+                        )
+                        .into()
+                }
+            }
+        }
+    }
+
+    pub fn compress_hi_to_packed(&self, poly: &Poly<F>) -> Poly<Ext::ExtensionPacking> {
+        assert!(self.k() <= poly.k());
+        assert!(poly.k() >= (self.k() + log2_strict_usize(F::Packing::WIDTH)));
+
+        match &self.eq0 {
+            MaybePacked::Unpacked(eq0) => {
+                let size_outer = poly.len() / self.eq1.len();
+                let size_inner = size_outer / (eq0.len() * F::Packing::WIDTH);
+                println!("size_outer: {size_outer}, size_inner: {size_inner}");
+                if poly.k() < 15 {
+                    let mut out = Ext::ExtensionPacking::zero_vec(size_inner);
+                    poly.chunks(size_outer)
+                        .zip(self.eq1.iter())
+                        .for_each(|(chunk, &w1)| {
+                            let chunk = F::Packing::pack_slice(chunk);
+                            chunk
+                                .chunks(size_inner)
+                                .zip_eq(eq0.iter())
+                                .for_each(|(chunk, &w0)| {
+                                    let w = w0 * w1;
+                                    let w = Ext::ExtensionPacking::from(w);
+                                    out.iter_mut()
+                                        .zip_eq(chunk.iter())
+                                        .for_each(|(acc, &f)| *acc += w * f);
+                                });
+                        });
+                    out.into()
+                } else {
+                    poly.par_chunks(size_outer)
+                        .zip_eq(self.eq1.par_iter())
+                        .map(|(chunk, &w1)| {
+                            let mut out = Ext::ExtensionPacking::zero_vec(size_inner);
+                            let chunk = F::Packing::pack_slice(chunk);
+                            chunk
+                                .chunks(size_inner)
+                                .zip_eq(eq0.iter())
+                                .for_each(|(chunk, &w0)| {
+                                    let w = w0 * w1;
+                                    let w = Ext::ExtensionPacking::from(w);
+                                    out.iter_mut()
+                                        .zip_eq(chunk.iter())
+                                        .for_each(|(acc, &f)| *acc += w * f);
+                                });
+                            out
+                        })
+                        .reduce(
+                            || Ext::ExtensionPacking::zero_vec(size_inner),
+                            |mut acc, part| {
+                                acc.iter_mut()
+                                    .zip_eq(part.iter())
+                                    .for_each(|(acc, &part)| *acc += part);
+                                acc
+                            },
+                        )
+                        .into()
+                }
+            }
+            MaybePacked::Packed(eq0) => {
+                let size_outer = poly.len() / self.eq1.len();
+                let size_inner = size_outer / (eq0.len() * F::Packing::WIDTH);
+
+                if poly.k() < 15 {
+                    let mut out = Ext::ExtensionPacking::zero_vec(size_inner / F::Packing::WIDTH);
+                    poly.chunks(size_outer)
+                        .zip_eq(self.eq1.iter())
+                        .for_each(|(chunk, &w1)| {
+                            chunk
+                                .chunks(size_inner * F::Packing::WIDTH)
+                                .zip_eq(eq0.iter())
+                                .for_each(|(chunk, &w0)| {
+                                    let ws = Ext::ExtensionPacking::to_ext_iter([w0 * w1]);
+                                    chunk.chunks(size_inner).zip_eq(ws).for_each(|(chunk, w)| {
+                                        let w = Ext::ExtensionPacking::from(w);
+                                        let chunk = F::Packing::pack_slice(chunk);
+                                        out.iter_mut()
+                                            .zip_eq(chunk.iter())
+                                            .for_each(|(acc, &f)| *acc += w * f);
                                     });
                                 });
                         });
@@ -365,30 +480,31 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
                 } else {
                     poly.par_chunks(size_outer)
                         .zip_eq(self.eq1.par_iter())
-                        .map(|(block, &w1)| {
-                            let mut out = Ext::zero_vec(size_inner);
-
-                            block
+                        .map(|(chunk, &w1)| {
+                            let mut out =
+                                Ext::ExtensionPacking::zero_vec(size_inner / F::Packing::WIDTH);
+                            chunk
                                 .chunks(size_inner * F::Packing::WIDTH)
                                 .zip_eq(eq0.iter())
                                 .for_each(|(chunk, &w0)| {
-                                    out.iter_mut().enumerate().for_each(|(i, acc)| {
-                                        let packed =
-                                            F::Packing::from_fn(|j| chunk[j * size_inner + i]);
-                                        *acc += Ext::ExtensionPacking::to_ext_iter([w0 * packed])
-                                            .sum::<Ext>()
-                                            * w1;
+                                    let ws = Ext::ExtensionPacking::to_ext_iter([w0 * w1]);
+                                    chunk.chunks(size_inner).zip_eq(ws).for_each(|(chunk, w)| {
+                                        let w = Ext::ExtensionPacking::from(w);
+                                        let chunk = F::Packing::pack_slice(chunk);
+                                        out.iter_mut()
+                                            .zip_eq(chunk.iter())
+                                            .for_each(|(acc, &f)| *acc += w * f);
                                     });
                                 });
                             out
                         })
                         .reduce(
-                            || Ext::zero_vec(size_inner),
-                            |mut a, b| {
-                                a.iter_mut()
-                                    .zip_eq(b.iter())
-                                    .for_each(|(acc, &x)| *acc += x);
-                                a
+                            || Ext::ExtensionPacking::zero_vec(size_inner / F::Packing::WIDTH),
+                            |mut acc, part| {
+                                acc.iter_mut()
+                                    .zip_eq(part.iter())
+                                    .for_each(|(acc, &part)| *acc += part);
+                                acc
                             },
                         )
                         .into()
@@ -398,15 +514,22 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
     }
 
     pub fn compress_lo(&self, poly: &Poly<F>) -> Poly<Ext> {
+        let mut out = Poly::zero(poly.k() - self.k());
+        self.compress_lo_into(&mut out, poly);
+        out
+    }
+
+    pub fn compress_lo_into(&self, out: &mut [Ext], poly: &Poly<F>) {
         assert!(self.k() <= poly.k());
+        assert_eq!(out.len(), poly.len() >> self.k());
 
         match &self.eq0 {
             MaybePacked::Unpacked(eq0) => {
                 if poly.k() < 15 {
-                    let size_outer = 1 << self.k();
-                    poly.chunks(size_outer)
-                        .map(|chunk| {
-                            chunk
+                    out.iter_mut()
+                        .zip_eq(poly.chunks(1 << self.k()))
+                        .for_each(|(out, chunk)| {
+                            *out = chunk
                                 .chunks(eq0.len())
                                 .zip_eq(self.eq1.iter())
                                 .map(|(chunk, &w1)| {
@@ -417,14 +540,13 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
                                         .sum::<Ext>()
                                         * w1
                                 })
-                                .sum::<Ext>()
-                        })
-                        .collect::<Vec<_>>()
-                        .into()
+                                .sum::<Ext>();
+                        });
                 } else {
-                    poly.par_chunks(1 << self.k())
-                        .map(|chunk| {
-                            chunk
+                    out.par_iter_mut()
+                        .zip(poly.par_chunks(1 << self.k()))
+                        .for_each(|(out, chunk)| {
+                            *out = chunk
                                 .chunks(eq0.len())
                                 .zip_eq(self.eq1.iter())
                                 .map(|(chunk, &w1)| {
@@ -435,39 +557,17 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
                                         .sum::<Ext>()
                                         * w1
                                 })
-                                .sum::<Ext>()
-                        })
-                        .collect::<Vec<_>>()
-                        .into()
+                                .sum::<Ext>();
+                        });
                 }
             }
             MaybePacked::Packed(eq0) => {
                 if poly.k() < 15 {
-                    let size_outer = 1 << self.k();
-                    poly.chunks(size_outer)
-                        .map(|chunk| {
+                    out.iter_mut()
+                        .zip_eq(poly.chunks(1 << self.k()))
+                        .for_each(|(out, chunk)| {
                             let chunk = F::Packing::pack_slice(chunk);
-                            chunk
-                                .chunks(eq0.len())
-                                .zip_eq(self.eq1.iter())
-                                .map(|(chunk, &w1)| {
-                                    chunk
-                                        .iter()
-                                        .zip_eq(eq0.iter())
-                                        .map(|(&f, &w0)| w0 * f)
-                                        .sum::<Ext::ExtensionPacking>()
-                                        * w1
-                                })
-                                .sum::<Ext::ExtensionPacking>()
-                        })
-                        .map(|packed| unpack(&[packed]).into_iter().sum::<Ext>())
-                        .collect::<Vec<_>>()
-                        .into()
-                } else {
-                    poly.par_chunks(1 << self.k())
-                        .map(|chunk| {
-                            let chunk = F::Packing::pack_slice(chunk);
-                            let packed = chunk
+                            let sum = chunk
                                 .chunks(eq0.len())
                                 .zip_eq(self.eq1.iter())
                                 .map(|(chunk, &w1)| {
@@ -479,45 +579,14 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
                                         * w1
                                 })
                                 .sum::<Ext::ExtensionPacking>();
-                            unpack(&[packed]).into_iter().sum::<Ext>()
-                        })
-                        .collect::<Vec<_>>()
-                        .into()
-                }
-            }
-        }
-    }
-
-    pub fn compress_lo_into(&self, out: &mut [Ext], poly: &Poly<F>) {
-        assert!(self.k() <= poly.k());
-        assert_eq!(out.len(), poly.len() >> self.k());
-
-        match &self.eq0 {
-            MaybePacked::Unpacked(eq0) => {
-                if poly.k() < 15 {
-                    let size_outer = 1 << self.k();
-                    out.iter_mut()
-                        .zip_eq(poly.chunks(size_outer))
-                        .for_each(|(out, chunk)| {
-                            *out = chunk
-                                .chunks(eq0.len())
-                                .zip_eq(self.eq1.iter())
-                                .map(|(chunk, &w1)| {
-                                    chunk
-                                        .iter()
-                                        .zip_eq(eq0.iter())
-                                        .map(|(&f, &w0)| w0 * f)
-                                        .sum::<Ext>()
-                                        * w1
-                                })
-                                .sum::<Ext>();
+                            *out = unpack(&[sum]).into_iter().sum::<Ext>();
                         });
                 } else {
-                    let size_outer = 1 << self.k();
                     out.par_iter_mut()
-                        .zip(poly.par_chunks(size_outer))
+                        .zip(poly.par_chunks(1 << self.k()))
                         .for_each(|(out, chunk)| {
-                            *out = chunk
+                            let chunk = F::Packing::pack_slice(chunk);
+                            let sum = chunk
                                 .chunks(eq0.len())
                                 .zip_eq(self.eq1.iter())
                                 .map(|(chunk, &w1)| {
@@ -525,94 +594,117 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
                                         .iter()
                                         .zip_eq(eq0.iter())
                                         .map(|(&f, &w0)| w0 * f)
-                                        .sum::<Ext>()
+                                        .sum::<Ext::ExtensionPacking>()
                                         * w1
                                 })
-                                .sum::<Ext>();
+                                .sum::<Ext::ExtensionPacking>();
+                            *out = unpack(&[sum]).into_iter().sum::<Ext>();
                         });
                 }
-            }
-            MaybePacked::Packed(_) => {
-                unimplemented!();
             }
         }
     }
 
     pub fn combine_into(&self, out: &mut [Ext], alpha: Option<Ext>) {
         assert_eq!(out.k(), self.k());
-        match &self.eq0 {
-            MaybePacked::Unpacked(eq0) => {
-                if self.k() < 15 {
+        if self.k() < 15 {
+            match (&self.eq0, alpha) {
+                (MaybePacked::Unpacked(eq0), Some(scale)) => {
                     out.chunks_mut(eq0.len())
                         .zip(self.eq1.iter())
-                        .for_each(|(chunk, &eq1)| match alpha {
-                            Some(scale) => chunk
+                        .for_each(|(chunk, &w1)| {
+                            chunk
                                 .iter_mut()
                                 .zip(eq0.iter())
-                                .for_each(|(out, &eq0)| *out += eq0 * eq1 * scale),
-                            None => chunk
-                                .iter_mut()
-                                .zip(eq0.iter())
-                                .for_each(|(out, &eq0)| *out += eq0 * eq1),
+                                .for_each(|(out, &w0)| *out += w0 * w1 * scale)
                         });
-                } else {
-                    out.par_chunks_mut(eq0.len())
-                        .zip(self.eq1.par_iter())
-                        .for_each(|(chunk, &eq1)| match alpha {
-                            Some(scale) => chunk
+                }
+                (MaybePacked::Unpacked(eq0), None) => {
+                    out.chunks_mut(eq0.len())
+                        .zip(self.eq1.iter())
+                        .for_each(|(chunk, &w1)| {
+                            chunk
                                 .iter_mut()
                                 .zip(eq0.iter())
-                                .for_each(|(out, &eq0)| *out += eq0 * eq1 * scale),
-                            None => chunk
-                                .iter_mut()
+                                .for_each(|(out, &w0)| *out += w0 * w1)
+                        });
+                }
+                (MaybePacked::Packed(eq0), Some(scale)) => {
+                    out.chunks_mut(eq0.len() * F::Packing::WIDTH)
+                        .zip(self.eq1.iter())
+                        .for_each(|(chunk, &w1)| {
+                            chunk
+                                .chunks_mut(F::Packing::WIDTH)
                                 .zip(eq0.iter())
-                                .for_each(|(out, &eq0)| *out += eq0 * eq1),
+                                .for_each(|(out, &w0)| {
+                                    out.iter_mut()
+                                        .zip_eq(Ext::ExtensionPacking::to_ext_iter([w0]))
+                                        .for_each(|(out, w0)| *out += w0 * w1 * scale)
+                                });
+                        });
+                }
+                (MaybePacked::Packed(eq0), None) => {
+                    out.chunks_mut(eq0.len() * F::Packing::WIDTH)
+                        .zip(self.eq1.iter())
+                        .for_each(|(chunk, &w1)| {
+                            chunk
+                                .chunks_mut(F::Packing::WIDTH)
+                                .zip(eq0.iter())
+                                .for_each(|(out, &w0)| {
+                                    out.iter_mut()
+                                        .zip_eq(Ext::ExtensionPacking::to_ext_iter([w0]))
+                                        .for_each(|(out, w0)| *out += w0 * w1)
+                                });
                         });
                 }
             }
-            MaybePacked::Packed(eq0) => {
-                if self.k() < 15 {
-                    out.chunks_mut(eq0.len() * F::Packing::WIDTH)
-                        .zip(self.eq1.iter())
-                        .for_each(|(chunk, &eq1)| {
+        } else {
+            match (&self.eq0, alpha) {
+                (MaybePacked::Unpacked(eq0), Some(scale)) => {
+                    out.par_chunks_mut(eq0.len())
+                        .zip(self.eq1.par_iter())
+                        .for_each(|(chunk, &w1)| {
                             chunk
-                                .chunks_mut(F::Packing::WIDTH)
+                                .iter_mut()
                                 .zip(eq0.iter())
-                                .for_each(|(out, &eq0)| {
-                                    let eqs = Ext::ExtensionPacking::to_ext_iter([eq0])
-                                        .collect::<Vec<_>>();
-                                    match alpha {
-                                        Some(scale) => out
-                                            .iter_mut()
-                                            .zip_eq(eqs.iter())
-                                            .for_each(|(out, &eq0)| *out += eq0 * eq1 * scale),
-                                        None => out
-                                            .iter_mut()
-                                            .zip_eq(eqs.iter())
-                                            .for_each(|(out, &eq0)| *out += eq0 * eq1),
-                                    }
-                                });
+                                .for_each(|(out, &w0)| *out += w0 * w1 * scale)
                         });
-                } else {
+                }
+                (MaybePacked::Unpacked(eq0), None) => {
+                    out.par_chunks_mut(eq0.len())
+                        .zip(self.eq1.par_iter())
+                        .for_each(|(chunk, &w1)| {
+                            chunk
+                                .iter_mut()
+                                .zip(eq0.iter())
+                                .for_each(|(out, &w0)| *out += w0 * w1)
+                        });
+                }
+                (MaybePacked::Packed(eq0), Some(scale)) => {
                     out.par_chunks_mut(eq0.len() * F::Packing::WIDTH)
                         .zip(self.eq1.par_iter())
-                        .for_each(|(chunk, &eq1)| {
+                        .for_each(|(chunk, &w1)| {
                             chunk
                                 .chunks_mut(F::Packing::WIDTH)
                                 .zip(eq0.iter())
-                                .for_each(|(out, &eq0)| {
-                                    let eqs = Ext::ExtensionPacking::to_ext_iter([eq0])
-                                        .collect::<Vec<_>>();
-                                    match alpha {
-                                        Some(scale) => out
-                                            .iter_mut()
-                                            .zip_eq(eqs.iter())
-                                            .for_each(|(out, &eq0)| *out += eq0 * eq1 * scale),
-                                        None => out
-                                            .iter_mut()
-                                            .zip_eq(eqs.iter())
-                                            .for_each(|(out, &eq0)| *out += eq0 * eq1),
-                                    }
+                                .for_each(|(out, &w0)| {
+                                    out.iter_mut()
+                                        .zip_eq(Ext::ExtensionPacking::to_ext_iter([w0]))
+                                        .for_each(|(out, w0)| *out += w0 * w1 * scale)
+                                });
+                        });
+                }
+                (MaybePacked::Packed(eq0), None) => {
+                    out.par_chunks_mut(eq0.len() * F::Packing::WIDTH)
+                        .zip(self.eq1.par_iter())
+                        .for_each(|(chunk, &w1)| {
+                            chunk
+                                .chunks_mut(F::Packing::WIDTH)
+                                .zip(eq0.iter())
+                                .for_each(|(out, &w0)| {
+                                    out.iter_mut()
+                                        .zip_eq(Ext::ExtensionPacking::to_ext_iter([w0]))
+                                        .for_each(|(out, w0)| *out += w0 * w1)
                                 });
                         });
                 }
@@ -620,81 +712,57 @@ impl<F: Field, Ext: ExtensionField<F>> SplitEq<F, Ext> {
         }
     }
 
-    pub fn combine_into_packed(&self, out: &mut [Ext::ExtensionPacking], alpha: Ext) {
+    pub fn combine_into_packed(&self, out: &mut [Ext::ExtensionPacking], scale: Option<Ext>) {
         assert_eq!(out.k() + log2_strict_usize(F::Packing::WIDTH), self.k());
-        match &self.eq0 {
-            MaybePacked::Packed(eq0) => {
-                if self.k() < 15 {
+
+        if self.k() < 15 {
+            match (&self.eq0, scale) {
+                (MaybePacked::Packed(eq0), Some(scale)) => {
                     out.chunks_mut(eq0.len())
                         .zip(self.eq1.iter())
-                        .for_each(|(chunk, &eq1)| {
+                        .for_each(|(chunk, &w1)| {
                             chunk
                                 .iter_mut()
                                 .zip(eq0.iter())
-                                .for_each(|(out, &eq0)| *out += eq0 * eq1 * alpha);
-                        });
-                } else {
-                    out.par_chunks_mut(eq0.len())
-                        .zip(self.eq1.par_iter())
-                        .for_each(|(chunk, &eq1)| {
-                            chunk
-                                .iter_mut()
-                                .zip(eq0.iter())
-                                .for_each(|(out, &eq0)| *out += eq0 * eq1 * alpha);
+                                .for_each(|(out, &w0)| *out += w0 * w1 * scale);
                         });
                 }
+                (MaybePacked::Packed(eq0), None) => {
+                    out.chunks_mut(eq0.len())
+                        .zip(self.eq1.iter())
+                        .for_each(|(chunk, &w1)| {
+                            chunk
+                                .iter_mut()
+                                .zip(eq0.iter())
+                                .for_each(|(out, &w0)| *out += w0 * w1);
+                        });
+                }
+                _ => unreachable!(),
             }
-            MaybePacked::Unpacked(_) => unreachable!(),
+        } else {
+            match (&self.eq0, scale) {
+                (MaybePacked::Packed(eq0), Some(scale)) => {
+                    out.par_chunks_mut(eq0.len())
+                        .zip(self.eq1.par_iter())
+                        .for_each(|(chunk, &w1)| {
+                            chunk
+                                .iter_mut()
+                                .zip(eq0.iter())
+                                .for_each(|(out, &w0)| *out += w0 * w1 * scale);
+                        });
+                }
+                (MaybePacked::Packed(eq0), None) => {
+                    out.par_chunks_mut(eq0.len())
+                        .zip(self.eq1.par_iter())
+                        .for_each(|(chunk, &w1)| {
+                            chunk
+                                .iter_mut()
+                                .zip(eq0.iter())
+                                .for_each(|(out, &w0)| *out += w0 * w1);
+                        });
+                }
+                _ => unreachable!(),
+            }
         }
     }
 }
-
-// fast when poly_k is close to point k
-// pub fn combine(&self, poly: &Poly<F>) -> Poly<Ext> {
-//     assert!(self.k() <= poly.k());
-
-//     match &self.eq0 {
-//         MaybePacked::Unpacked(eq0) => {
-//             let size_outer = 1 << self.k();
-//             poly.chunks(size_outer)
-//                 .map(|chunk| {
-//                     chunk
-//                         .par_chunks(eq0.len())
-//                         .zip_eq(self.eq1.par_iter())
-//                         .map(|(chunk, &w1)| {
-//                             chunk
-//                                 .iter()
-//                                 .zip_eq(eq0.iter())
-//                                 .map(|(&f, &w0)| w0 * f)
-//                                 .sum::<Ext>()
-//                                 * w1
-//                         })
-//                         .sum::<Ext>()
-//                 })
-//                 .collect::<Vec<_>>()
-//                 .into()
-//         }
-//         MaybePacked::Packed(eq0) => {
-//             let size_outer = 1 << self.k();
-//             poly.chunks(size_outer)
-//                 .map(|chunk| {
-//                     let chunk = F::Packing::pack_slice(chunk);
-//                     let sum = chunk
-//                         .par_chunks(eq0.len())
-//                         .zip_eq(self.eq1.par_iter())
-//                         .map(|(chunk, &w1)| {
-//                             chunk
-//                                 .iter()
-//                                 .zip_eq(eq0.iter())
-//                                 .map(|(&f, &w0)| w0 * f)
-//                                 .sum::<Ext::ExtensionPacking>()
-//                                 * w1
-//                         })
-//                         .sum::<Ext::ExtensionPacking>();
-//                     unpack(&[sum]).into_iter().sum::<Ext>()
-//                 })
-//                 .collect::<Vec<_>>()
-//                 .into()
-//         }
-//     }
-// }
