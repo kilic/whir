@@ -89,6 +89,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverStack<F, Ext> {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn layout(self) -> ProverLayout<F, Ext> {
         let mut order = (0..self.polys.len()).collect::<Vec<usize>>();
         order.sort_by_key(|&i| self.k_poly(i));
@@ -200,7 +201,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
             tracing::info_span!("combine virtual").in_scope(|| {
                 let (svo, rest) = claim.point.split_at(rs.k());
                 let scale = alpha_i * eval_eq_xy(&svo, rs);
-                SplitEq::new(&rest, scale).combine_into(&mut out, None);
+                SplitEq::new_packed(&rest, scale).combine_into(&mut out, None);
             });
             alpha_i *= alpha;
         });
@@ -211,7 +212,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
     fn compress_stacked(&self, rs: &Point<Ext>) -> Poly<Ext> {
         assert!(rs.k() <= self.k);
         let mut out = Poly::<Ext>::zero(self.k - rs.k());
-        let rs = SplitEq::new_unpacked(rs);
+        let rs = SplitEq::new_unpacked(rs, Ext::ONE);
         for (selector, &id) in self.layout.iter() {
             assert!(rs.k() <= self.stack.k_poly(id));
             let poly = &self.stack.polys[id];
@@ -222,7 +223,7 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn expression(self, rs: &Point<Ext>, alpha: Ext) -> Expression<F, Ext> {
+    fn expression(self, rs: &Point<Ext>, alpha: Ext) -> Expression<F, Ext> {
         let poly = self.compress_stacked(rs);
         let weights = self.combine_eqs(rs, alpha);
         Expression::new(poly, weights)
@@ -256,13 +257,14 @@ impl<F: Field, Ext: ExtensionField<F>> ProverLayout<F, Ext> {
 
         #[cfg(debug_assertions)]
         {
-            let poly = self.compress_stacked(&vec![].into());
-            let point = SvoPoint::<Ext, Ext>::new(self.k_svo(), &point);
-            let claim = SvoClaim::<Ext, Ext>::new(point, &poly);
+            let poly = self.poly();
+            let point = SvoPoint::<F, Ext>::new(self.k_svo(), &point);
+            let claim = SvoClaim::<F, Ext>::new(point, poly);
             assert_eq!(eval, claim.eval);
-            let claim_accumulators =
-                Svo::<Ext>::new(self.k_svo()).calculate_accumulators(&[claim], &[Ext::ONE]);
-            assert_eq!(accumulators, claim_accumulators);
+            assert_eq!(
+                accumulators,
+                self.svo.calculate_accumulators(&[claim], &[Ext::ONE])
+            );
         }
 
         let claim = VirtualClaim {
@@ -389,7 +391,7 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckProver<F, Ext> {
         self.expr
             .combine_claims(&mut self.sum, self.alpha, eq_claims, pow_claims);
         let rs = (0..d)
-            .map(|_| self.expr.round(transcript, &mut self.sum))
+            .map(|_| self.expr.round_lo_var(transcript, &mut self.sum))
             .collect::<Result<Vec<_>, _>>()?;
 
         self.rs.extend(rs.iter());
@@ -508,7 +510,7 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckProver<F, Ext> {
         let two_inv = F::TWO.inverse();
         let mut rs = Point::empty();
         for round in 0..d {
-            let (mut c0, mut c2) = self.expr.coeffs();
+            let (mut c0, mut c2) = self.expr.coeffs_lo_var();
 
             let l = 1 << (k_data - round);
             let mid = l / 2;
@@ -537,7 +539,7 @@ impl<F: Field, Ext: ExtensionField<F>> SumcheckProver<F, Ext> {
             self.sum = extrapolate_012(c0, self.sum - c0, c2, r);
             rs.push(r);
 
-            self.expr.fix_var(r);
+            self.expr.fix_lo_var(r);
 
             ws.iter_mut()
                 .zip(ts.iter_mut())
@@ -593,7 +595,7 @@ mod test {
     use rand::RngExt;
     use rayon::prelude::*;
 
-    use crate::sumcheck::expr::coeffs;
+    use crate::sumcheck::expr::coeffs_lo_var;
 
     #[test]
     fn test_fold_with_code() {
@@ -745,7 +747,7 @@ mod test {
                 let r: Ext = rng.random();
                 rs_cur.push(r);
 
-                let (c0, c2) = coeffs(&poly, &pows_combined);
+                let (c0, c2) = coeffs_lo_var(&poly, &pows_combined);
                 assert_eq!(c0_pow, c0);
                 assert_eq!(c2_pow, c2);
                 poly.fix_lo_var_mut(r);

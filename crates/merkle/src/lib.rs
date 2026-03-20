@@ -402,7 +402,7 @@ mod test {
         let k = 18;
         let width = 32;
 
-        // init_tracing();
+        common::test::init_tracing();
         let mut transcript = TestWriter::<Vec<u8>, F>::init();
         let coeffs: Vec<Ext> = rand_vec(&mut rng, (1 << k) * width);
         let data = RowMajorMatrix::new(coeffs, width);

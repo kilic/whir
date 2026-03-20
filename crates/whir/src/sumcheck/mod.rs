@@ -1,18 +1,18 @@
 use common::field::*;
-use poly::{Point, Poly};
+use poly::{Point, Poly, eq::SplitEq};
 use transcript::{Challenge, Reader};
 
 mod combine;
 mod expr;
-// pub mod prover;
-// pub mod prover2;
 pub mod prover;
-// mod svo;
-// mod svo2;
+pub mod prover2;
 mod svo;
 #[cfg(test)]
 pub(crate) mod test;
+#[cfg(test)]
+pub(crate) mod test2;
 pub mod verifier;
+pub mod verifier2;
 
 pub(super) fn lagrange_weights_012<F: Field>(r: F) -> [F; 3] {
     let inv_two = F::TWO.inverse();
@@ -61,6 +61,49 @@ impl Selector {
 pub struct EqClaim<Ext: Field> {
     pub(crate) point: Point<Ext>,
     pub(crate) eval: Ext,
+}
+
+#[derive(Debug, Clone)]
+pub struct SplitEqClaim<F: Field, Ext: ExtensionField<F>> {
+    pub(crate) split: SplitEq<F, Ext>,
+    pub(crate) point: Point<Ext>,
+    pub(crate) eval: Ext,
+}
+
+impl<F: Field, Ext: ExtensionField<F>> PartialEq for SplitEqClaim<F, Ext> {
+    fn eq(&self, other: &Self) -> bool {
+        self.point == other.point && self.eval == other.eval
+    }
+}
+
+impl<F: Field, Ext: ExtensionField<F>> Eq for SplitEqClaim<F, Ext> {}
+
+impl<F: Field, Ext: ExtensionField<F>> SplitEqClaim<F, Ext> {
+    pub fn new(point: Point<Ext>, poly: &Poly<F>) -> Self {
+        let split = SplitEq::new_packed(&point, Ext::ONE);
+        let eval = split.eval_base(poly);
+        Self { split, point, eval }
+    }
+
+    pub fn k(&self) -> usize {
+        self.point.len()
+    }
+
+    pub fn eq(&self) -> Poly<Ext> {
+        self.point.eq(Ext::ONE)
+    }
+
+    pub fn eval(&self) -> &Ext {
+        &self.eval
+    }
+
+    pub fn point(&self) -> &SplitEq<F, Ext> {
+        &self.split
+    }
+    // pub fn split(&self) -> &SplitEq<F, Ext> {
+    //     &self.point
+
+    // }
 }
 
 impl<Ext: Field> EqClaim<Ext> {

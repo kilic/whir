@@ -64,7 +64,7 @@ impl<F: Field, Ext: ExtensionField<F>> SvoPoint<F, Ext> {
     pub(crate) fn new(k_svo: usize, point: &Point<Ext>) -> Self {
         assert!(k_svo <= point.k());
         let (svo, z_split) = point.split_at(k_svo);
-        let split = SplitEq::new_unpacked(&z_split);
+        let split = SplitEq::new_unpacked(&z_split, Ext::ONE);
         SvoPoint { svo, split }
     }
 
@@ -154,7 +154,6 @@ pub(crate) struct Svo<F: Field> {
 }
 
 impl<F: Field> Svo<F> {
-    #[tracing::instrument(skip_all, name = "Svo::new")]
     pub(crate) fn new(l: usize) -> Self {
         fn extend_eq<F: Field>(prev: &Poly<F>, zi: F) -> Poly<F> {
             let mut eq = F::zero_vec(prev.len() * 2);
@@ -221,7 +220,6 @@ impl<F: Field> Svo<F> {
         Self { coeffs }
     }
 
-    #[tracing::instrument(skip_all, name = "Svo::calculate_accumulators")]
     pub(crate) fn calculate_accumulators<Ext: ExtensionField<F>>(
         &self,
         claims: &[SvoClaim<F, Ext>],

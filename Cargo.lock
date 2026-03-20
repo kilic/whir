@@ -343,8 +343,8 @@ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
 name = "p3-baby-bear"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "p3-challenger",
  "p3-field",
@@ -358,8 +358,8 @@ dependencies = [
 
 [[package]]
 name = "p3-challenger"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "p3-field",
  "p3-maybe-rayon",
@@ -371,8 +371,8 @@ dependencies = [
 
 [[package]]
 name = "p3-dft"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "itertools 0.14.0",
  "p3-field",
@@ -385,8 +385,8 @@ dependencies = [
 
 [[package]]
 name = "p3-field"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "itertools 0.14.0",
  "num-bigint",
@@ -400,8 +400,8 @@ dependencies = [
 
 [[package]]
 name = "p3-goldilocks"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "num-bigint",
  "p3-challenger",
@@ -419,8 +419,8 @@ dependencies = [
 
 [[package]]
 name = "p3-koala-bear"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "p3-challenger",
  "p3-field",
@@ -434,8 +434,8 @@ dependencies = [
 
 [[package]]
 name = "p3-matrix"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "itertools 0.14.0",
  "p3-field",
@@ -448,16 +448,16 @@ dependencies = [
 
 [[package]]
 name = "p3-maybe-rayon"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "rayon",
 ]
 
 [[package]]
 name = "p3-mds"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "p3-dft",
  "p3-field",
@@ -468,8 +468,8 @@ dependencies = [
 
 [[package]]
 name = "p3-monty-31"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "itertools 0.14.0",
  "num-bigint",
@@ -491,8 +491,8 @@ dependencies = [
 
 [[package]]
 name = "p3-poseidon1"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "p3-field",
  "p3-symmetric",
@@ -501,8 +501,8 @@ dependencies = [
 
 [[package]]
 name = "p3-poseidon2"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "p3-field",
  "p3-mds",
@@ -513,8 +513,8 @@ dependencies = [
 
 [[package]]
 name = "p3-symmetric"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "itertools 0.14.0",
  "p3-field",
@@ -524,8 +524,8 @@ dependencies = [
 
 [[package]]
 name = "p3-util"
-version = "0.5.0"
-source = "git+https://github.com/plonky3/plonky3.git#e52636ec09663fd7d3bd4eaabb21dba8698f129a"
+version = "0.5.1"
+source = "git+https://github.com/plonky3/plonky3.git#0a2cec58c94e5d4a646b7fa084208746a6927a39"
 dependencies = [
  "rayon",
  "serde",
